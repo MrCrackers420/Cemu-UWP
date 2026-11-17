@@ -1,0 +1,67 @@
+name: Host compile check
+
+# Fast feedback for the UWP host sources only. The Cemu runtime is replaced
+# by empty placeholders, so linking is expected to fail; compiler and XAML
+# errors are what this run is for. It never produces an installable package.
+on:
+  push:
+
+jobs:
+  compile:
+    runs-on: windows-2025-vs2026
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          path: Cemu-UWP
+
+      - name: Checkout Cemu headers
+        uses: actions/checkout@v7
+        with:
+          repository: XboxEmuPorts/Cemu
+          ref: build-msvc-d3d11
+          path: Cemu
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v3
+        with:
+          vs-version: '[18.0,19.0)'
+
+      - name: Placeholder runtime payload
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .\Cemu\bin\resources\sharedFonts, .\Cemu\bin\gameProfiles | Out-Null
+          Set-Content -Path .\Cemu\bin\Cemu_release.dll -Value 'placeholder'
+          Set-Content -Path .\Cemu\bin\resources\sharedFonts\CafeCn.ttf -Value 'placeholder'
+
+      - name: Compile host
+        shell: pwsh
+        run: |
+          msbuild .\Cemu-UWP\Cemu-UWP-Host.vcxproj `
+            /restore /m `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:GenerateAppxPackageOnBuild=false `
+            /p:AppxPackageSigningEnabled=false `
+            "/flp:logfile=$env:GITHUB_WORKSPACE\msbuild-host.log;verbosity=normal;encoding=UTF-8" `
+            "/flp1:logfile=$env:GITHUB_WORKSPACE\msbuild-errors.log;errorsonly;encoding=UTF-8"
+          $buildExit = $LASTEXITCODE
+          $errors = @(Get-Content .\msbuild-errors.log -ErrorAction SilentlyContinue | Where-Object { $_.Trim() })
+          $real = @($errors | Where-Object { $_ -notmatch 'LNK\d+' })
+          Write-Host "==== errors other than link errors: $($real.Count) ===="
+          $real | ForEach-Object { Write-Host $_ }
+          Write-Host "==== link errors (expected with a placeholder runtime): $($errors.Count - $real.Count) ===="
+          $errors | Where-Object { $_ -match 'LNK\d+' } | Select-Object -First 5 | ForEach-Object { Write-Host $_ }
+          if ($real.Count -gt 0) { exit 1 }
+          if ($errors.Count -eq 0 -and $buildExit -ne 0) { exit 1 }
+          exit 0
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: host-compile-logs
+          path: |
+            msbuild-host.log
+            msbuild-errors.log
+          if-no-files-found: ignore
