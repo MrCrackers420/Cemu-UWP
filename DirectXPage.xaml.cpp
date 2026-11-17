@@ -119,6 +119,7 @@ struct LocalGameFile
 	std::string brokeredRelativePath;
 	StorageFolder^ brokeredTitleFolder{ nullptr };
 	uint64_t graphicPackTitleId{};
+	bool developmentFiles{};
 };
 
 struct LocalInstallScanResult
@@ -131,6 +132,7 @@ struct LocalInstallScanResult
 	uint32_t graphicPackFailures{};
 	uint32_t graphicPacksAlreadyProcessed{};
 	std::vector<LocalGameFile> localGameFiles;
+	std::vector<std::wstring> developmentFilesLog;
 };
 
 struct ExternalStorageScanResult
@@ -635,6 +637,8 @@ DirectXPage::DirectXPage()
 		RacingWheel::RacingWheelAdded += ref new EventHandler<RacingWheel^>(this, &DirectXPage::OnRacingWheelAdded);
 	m_wheelRemovedToken =
 		RacingWheel::RacingWheelRemoved += ref new EventHandler<RacingWheel^>(this, &DirectXPage::OnRacingWheelRemoved);
+	m_rawControllerAddedToken =
+		RawGameController::RawGameControllerAdded += ref new EventHandler<RawGameController^>(this, &DirectXPage::OnRawGameControllerAdded);
 	// Xbox also projects controller buttons as CoreWindow keys. Consume that
 	// parallel XAML navigation route while a title is running; otherwise B can
 	// become a system Back request even though the same button was already sent
@@ -787,6 +791,7 @@ DirectXPage::~DirectXPage()
 	Gamepad::GamepadRemoved -= m_gamepadRemovedToken;
 	RacingWheel::RacingWheelAdded -= m_wheelAddedToken;
 	RacingWheel::RacingWheelRemoved -= m_wheelRemovedToken;
+	RawGameController::RawGameControllerAdded -= m_rawControllerAddedToken;
 	Window::Current->CoreWindow->KeyDown -= m_coreWindowKeyDownToken;
 	Window::Current->CoreWindow->KeyUp -= m_coreWindowKeyUpToken;
 	SystemNavigationManager::GetForCurrentView()->BackRequested -= m_backRequestedToken;
@@ -1307,15 +1312,151 @@ bool IsCemuExternalFolderAccessEntry(const AccessListEntry& entry)
 	return wcsncmp(metadata, ExternalFolderAccessMetadataPrefix, prefixLength) == 0;
 }
 
-// Xbox Developer Mode stores files copied over the network in
-// DevelopmentFiles. With the broadFileSystemAccess capability (declared in
-// Package.appxmanifest) the folder can be opened by path and is scanned like
-// a picked external folder. If the console refuses, the refusal is logged and
-// nothing else changes.
+// Xbox Developer Mode keeps files copied from a PC (network share or Device
+// Portal) in DevelopmentFiles. The Windows.Storage broker refuses that folder
+// (E_ACCESSDENIED), but plain Win32 file calls can read it, which is how the
+// danprice142/Cemu-UWP port lists games there. Found games are added to the
+// library as path-based local games, exactly like LocalState\GamesToInstall.
 const wchar_t* const DevelopmentFilesGameFolders[] = {
 	L"D:\\DevelopmentFiles\\Games\\wiiu",
 	L"S:\\DevelopmentFiles\\Games\\wiiu",
 };
+constexpr char DevelopmentFilesRegionName[] = "DevelopmentFiles";
+
+std::string WideToUtf8(const std::wstring& value)
+{
+	if (value.empty())
+		return {};
+	const int length = WideCharToMultiByte(CP_UTF8, 0, value.data(),
+		static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+	if (length <= 0)
+		return {};
+	std::string converted(static_cast<size_t>(length), '\0');
+	WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
+		&converted[0], length, nullptr, nullptr);
+	return converted;
+}
+
+bool Win32FileExists(const std::wstring& path)
+{
+	WIN32_FILE_ATTRIBUTE_DATA info{};
+	return GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info) &&
+		(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+bool Win32DirectoryExists(const std::wstring& path)
+{
+	WIN32_FILE_ATTRIBUTE_DATA info{};
+	return GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info) &&
+		(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+std::wstring Win32LeafName(const std::wstring& path)
+{
+	const auto separator = path.find_last_of(L"\\/");
+	return separator == std::wstring::npos ? path : path.substr(separator + 1);
+}
+
+// Mirrors FindLocalStorageContent, with Win32 instead of Windows.Storage.
+// Graphic Packs are not imported from here.
+void FindWin32GameContent(const std::wstring& folder, int depth,
+	std::vector<LocalGameFile>& games, uint32_t& unreadable)
+{
+	if (depth > 8)
+		return;
+	if (Win32FileExists(folder + L"\\code\\app.xml") &&
+		Win32FileExists(folder + L"\\meta\\meta.xml") &&
+		Win32DirectoryExists(folder + L"\\content"))
+	{
+		const auto path = WideToUtf8(folder);
+		games.push_back({ StableLocalGameId(path), WideToUtf8(Win32LeafName(folder)),
+			path, "EXTRACTED" });
+		return;
+	}
+	if (Win32FileExists(folder + L"\\title.tmd"))
+	{
+		const auto path = WideToUtf8(folder);
+		games.push_back({ StableLocalGameId(path), WideToUtf8(Win32LeafName(folder)),
+			path, "NUS TITLE" });
+		return;
+	}
+	WIN32_FIND_DATAW entry{};
+	const std::wstring pattern = folder + L"\\*";
+	HANDLE find = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &entry,
+		FindExSearchNameMatch, nullptr, 0);
+	if (find == INVALID_HANDLE_VALUE)
+	{
+		++unreadable;
+		return;
+	}
+	std::vector<std::wstring> children;
+	do
+	{
+		const std::wstring name = entry.cFileName;
+		if (name == L"." || name == L"..")
+			continue;
+		const std::wstring full = folder + L"\\" + name;
+		if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+		{
+			if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0)
+				children.emplace_back(full);
+			continue;
+		}
+		const auto dot = name.find_last_of(L'.');
+		if (dot == std::wstring::npos)
+			continue;
+		auto extension = WideToUtf8(name.substr(dot));
+		if (!IsSupportedLocalGameExtension(extension))
+			continue;
+		std::transform(extension.begin(), extension.end(), extension.begin(),
+			[](unsigned char value) { return static_cast<char>(std::toupper(value)); });
+		const auto path = WideToUtf8(full);
+		games.push_back({ StableLocalGameId(path), WideToUtf8(name), path, extension });
+	} while (FindNextFileW(find, &entry));
+	FindClose(find);
+	std::sort(children.begin(), children.end());
+	for (const auto& child : children)
+		FindWin32GameContent(child, depth + 1, games, unreadable);
+}
+
+// Returns the games found, and one log line per candidate folder.
+std::vector<LocalGameFile> ScanDevelopmentFilesGames(std::vector<std::wstring>& log)
+{
+	std::vector<LocalGameFile> games;
+	for (const auto* candidate : DevelopmentFilesGameFolders)
+	{
+		std::wostringstream line;
+		line << L"[storage] " << candidate << L": ";
+		WIN32_FILE_ATTRIBUTE_DATA info{};
+		if (!GetFileAttributesExW(candidate, GetFileExInfoStandard, &info))
+		{
+			const DWORD error = GetLastError();
+			line << (error == ERROR_ACCESS_DENIED ? L"access denied"
+				: error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? L"not found"
+				: L"cannot be opened")
+				<< L" (Win32 error " << error << L").";
+			log.emplace_back(line.str());
+			continue;
+		}
+		if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+		{
+			line << L"is a file, not a folder.";
+			log.emplace_back(line.str());
+			continue;
+		}
+		uint32_t unreadable = 0;
+		const size_t before = games.size();
+		FindWin32GameContent(candidate, 0, games, unreadable);
+		line << L"readable, " << (games.size() - before) << L" game(s) found";
+		if (unreadable)
+			line << L", " << unreadable << L" folder(s) could not be listed (Win32 error "
+				<< GetLastError() << L")";
+		line << L".";
+		log.emplace_back(line.str());
+		break; // D: and S: are the same storage on consoles that have both
+	}
+	return games;
+}
 
 std::vector<Platform::String^> GetPersistedExternalFolderTokens()
 {
@@ -1425,8 +1566,9 @@ void DirectXPage::RefreshGraphicPackGames()
 		m_graphicPackGameIds.emplace_back(graphicPackTitleId);
 		std::string label = title.name;
 		if (!title.localGamePath.empty())
-			label += title.isExternalStorage
-				? "  [External storage]" : "  [GamesToInstall]";
+			label += title.isExternalStorage ? "  [External storage]"
+				: title.regionName == DevelopmentFilesRegionName ? "  [DevelopmentFiles]"
+				: "  [GamesToInstall]";
 		graphicPackGameBox->Items->Append(FromUtf8(label));
 	}
 	graphicPackGameBox->IsEnabled = m_cemuReady && !m_graphicPackGameIds.empty();
@@ -1616,14 +1758,19 @@ void DirectXPage::RestoreExternalStorageFolders(bool showEmptyStatus)
 	if (!m_main || !m_cemuReady || m_libraryBusy || m_gameRunning)
 		return;
 	const auto tokens = GetPersistedExternalFolderTokens();
-	launchStatus->Text = tokens.empty()
-		? "Checking DevelopmentFiles\\Games\\wiiu..."
-		: "Restoring external game folders...";
+	if (tokens.empty())
+	{
+		m_externalTitles.clear();
+		if (showEmptyStatus)
+			launchStatus->Text = "No external folders saved";
+		RefreshLibrary();
+		return;
+	}
+	launchStatus->Text = "Restoring external game folders...";
 	Platform::WeakReference weakThis(this);
 	create_task([tokens]()
 	{
 		std::vector<StorageFolder^> roots;
-		std::vector<std::wstring> probeLog;
 		auto accessList = StorageApplicationPermissions::FutureAccessList;
 		for (const auto& token : tokens)
 		{
@@ -1638,69 +1785,21 @@ void DirectXPage::RestoreExternalStorageFolders(bool showEmptyStatus)
 				// Keep the token so a temporarily disconnected drive can return later.
 			}
 		}
-		bool developmentFilesFound = false;
-		for (const auto* candidate : DevelopmentFilesGameFolders)
-		{
-			std::wostringstream line;
-			line << L"[storage] " << candidate << L": ";
-			try
-			{
-				auto root = create_task(StorageFolder::GetFolderFromPathAsync(
-					ref new Platform::String(candidate))).get();
-				if (root)
-				{
-					roots.emplace_back(root);
-					developmentFilesFound = true;
-					line << L"opened, scanning it.";
-					probeLog.emplace_back(line.str());
-					break;
-				}
-				line << L"no folder returned.";
-			}
-			catch (Platform::Exception^ exception)
-			{
-				const auto code = static_cast<unsigned int>(exception->HResult);
-				line << (code == 0x80070005u ? L"access denied"
-					: code == 0x80070002u || code == 0x80070003u ? L"not found"
-					: L"cannot be opened")
-					<< L" (HRESULT 0x" << std::hex << code << L").";
-			}
-			catch (...)
-			{
-				line << L"cannot be opened (unknown error).";
-			}
-			probeLog.emplace_back(line.str());
-		}
-		return std::make_tuple(std::move(roots), std::move(probeLog), developmentFilesFound);
-	}).then([weakThis, showEmptyStatus](
-		std::tuple<std::vector<StorageFolder^>, std::vector<std::wstring>, bool> result)
+		return roots;
+	}).then([weakThis](std::vector<StorageFolder^> restored)
 	{
 		auto page = weakThis.Resolve<DirectXPage>();
 		if (!page)
 			return;
-		auto& restored = std::get<0>(result);
-		for (const auto& line : std::get<1>(result))
-			page->WheelLog(line);
-		const bool developmentFilesFound = std::get<2>(result);
 		if (restored.empty())
 		{
 			page->m_externalTitles.clear();
-			if (showEmptyStatus)
-				page->launchStatus->Text = page->GetPersistedExternalFolderCount() == 0
-					? "No external folders saved; DevelopmentFiles\\Games\\wiiu is not readable by the app"
-					: "Saved external folders are disconnected or unavailable";
+			page->launchStatus->Text = "Saved external folders are disconnected or unavailable";
 			page->RefreshLibrary();
 			return;
 		}
-		if (developmentFilesFound)
-			page->WheelLog(L"[storage] DevelopmentFiles game folder is readable; its games are listed as External storage.");
 		page->BeginExternalStorageScan(restored);
 	}, task_continuation_context::use_current());
-}
-
-size_t DirectXPage::GetPersistedExternalFolderCount()
-{
-	return GetPersistedExternalFolderTokens().size();
 }
 
 void DirectXPage::BeginExternalStorageScan(const std::vector<StorageFolder^>& storageRoots)
@@ -2304,6 +2403,23 @@ void DirectXPage::RefreshLibrary(bool scanLocalFolder)
 			if (scanLocalFolder)
 				++scanResult.failed;
 		}
+		// DevelopmentFiles\Games\wiiu, read with Win32 (see ScanDevelopmentFilesGames).
+		try
+		{
+			auto developmentGames = ScanDevelopmentFilesGames(scanResult.developmentFilesLog);
+			for (auto& gameFile : developmentGames)
+			{
+				uint64_t titleId{};
+				if (main && main->IdentifyGamePath(gameFile.path, &titleId))
+					gameFile.graphicPackTitleId = titleId;
+				gameFile.developmentFiles = true;
+				scanResult.localGameFiles.emplace_back(std::move(gameFile));
+			}
+		}
+		catch (...)
+		{
+			scanResult.developmentFilesLog.emplace_back(L"[storage] DevelopmentFiles scan failed unexpectedly.");
+		}
 		auto titles = main ? main->GetInstalledTitles() : std::vector<InstalledTitle>{};
 		return std::make_pair(std::move(titles), scanResult);
 	}).then([weakThis, scanLocalFolder](
@@ -2313,12 +2429,15 @@ void DirectXPage::RefreshLibrary(bool scanLocalFolder)
 		if (!page) return;
 		auto titles = std::move(result.first);
 		const auto scanResult = result.second;
+		for (const auto& line : scanResult.developmentFilesLog)
+			page->WheelLog(line);
 		for (const auto& localGame : scanResult.localGameFiles)
 		{
 			InstalledTitle localTitle{};
 			localTitle.titleId = localGame.id;
 			localTitle.name = localGame.name;
-			localTitle.regionName = "Local storage";
+			localTitle.regionName = localGame.developmentFiles
+				? DevelopmentFilesRegionName : "Local storage";
 			localTitle.localGamePath = localGame.path;
 			localTitle.localGameFormat = localGame.format;
 			localTitle.graphicPackTitleId = localGame.graphicPackTitleId;
@@ -2335,7 +2454,9 @@ void DirectXPage::RefreshLibrary(bool scanLocalFolder)
 			if (!title.localGamePath.empty())
 			{
 				subtitle << title.localGameFormat << " · "
-					<< (title.isExternalStorage ? "External" : "GamesToInstall");
+					<< (title.isExternalStorage ? "External"
+						: title.regionName == DevelopmentFilesRegionName ? "DevelopmentFiles"
+						: "GamesToInstall");
 			}
 			else
 			{
@@ -3842,6 +3963,76 @@ void DirectXPage::ResetWheelBindings_Click(Platform::Object^, RoutedEventArgs^)
 	settingsStatus->Text = "Default wheel bindings restored.";
 }
 
+void DirectXPage::LogGameControllers(const wchar_t* reason)
+{
+	// Diagnostic: every controller the system reports, and which typed
+	// projections it supports. This shows whether a wheel is visible at all
+	// and as what (racing wheel, gamepad, or only a raw controller).
+	try
+	{
+		auto controllers = RawGameController::RawGameControllers;
+		std::wostringstream header;
+		header << L"Controllers (" << reason << L"): " << (controllers ? controllers->Size : 0u)
+			<< L" reported by the system.";
+		WheelLog(header.str());
+		if (!controllers)
+			return;
+		for (unsigned int index = 0; index < controllers->Size; ++index)
+			LogGameController(controllers->GetAt(index), L"  ");
+	}
+	catch (Platform::Exception^ exception)
+	{
+		std::wostringstream line;
+		line << L"Controller enumeration failed (HRESULT 0x" << std::hex
+			<< static_cast<unsigned int>(exception->HResult) << L").";
+		WheelLog(line.str());
+	}
+}
+
+void DirectXPage::LogGameController(RawGameController^ raw, const wchar_t* prefix)
+{
+	if (!raw)
+		return;
+	std::wostringstream line;
+	line << prefix;
+	try
+	{
+		auto name = raw->DisplayName;
+		line << L"\"" << (name ? name->Data() : L"") << L"\" VID " << std::hex << std::setw(4)
+			<< std::setfill(L'0') << raw->HardwareVendorId << L" PID " << std::setw(4)
+			<< raw->HardwareProductId << std::dec << std::setfill(L' ')
+			<< L", " << raw->ButtonCount << L" buttons, " << raw->AxisCount << L" axes, "
+			<< raw->SwitchCount << L" switches, wireless " << (raw->IsWireless ? L"yes" : L"no");
+		bool racingWheel = false;
+		bool gamepad = false;
+		bool navigation = false;
+		try { racingWheel = RacingWheel::FromGameController(raw) != nullptr; } catch (Platform::Exception^) {}
+		try { gamepad = Gamepad::FromGameController(raw) != nullptr; } catch (Platform::Exception^) {}
+		try { navigation = UINavigationController::FromGameController(raw) != nullptr; } catch (Platform::Exception^) {}
+		line << L"; as racing wheel " << (racingWheel ? L"YES" : L"no")
+			<< L", as gamepad " << (gamepad ? L"yes" : L"no")
+			<< L", as navigation " << (navigation ? L"yes" : L"no") << L".";
+	}
+	catch (Platform::Exception^ exception)
+	{
+		line << L"(details unavailable, HRESULT 0x" << std::hex
+			<< static_cast<unsigned int>(exception->HResult) << L")";
+	}
+	WheelLog(line.str());
+}
+
+void DirectXPage::OnRawGameControllerAdded(Platform::Object^, RawGameController^ raw)
+{
+	Platform::WeakReference weakThis(this);
+	create_task(Dispatcher->RunAsync(CoreDispatcherPriority::Normal,
+		ref new DispatchedHandler([weakThis, raw]()
+		{
+			auto page = weakThis.Resolve<DirectXPage>();
+			if (page)
+				page->LogGameController(raw, L"Controller connected: ");
+		})));
+}
+
 void DirectXPage::RefreshRacingWheel()
 {
 	// Enumerate only on startup and resume, never per frame (see m_gamepads).
@@ -3865,6 +4056,7 @@ void DirectXPage::RefreshRacingWheel()
 		}
 		else
 			WheelLog(L"No racing wheel is connected at enumeration time.");
+		LogGameControllers(L"enumeration");
 	}
 	catch (Platform::Exception^ exception)
 	{

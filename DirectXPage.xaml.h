@@ -41,6 +41,7 @@ namespace Cemu_UWP_Host
 		// T98_BRIDGE_V2: one racing wheel acts as one independent player.
 		void OnRacingWheelAdded(Platform::Object^ sender, Windows::Gaming::Input::RacingWheel^ wheel);
 		void OnRacingWheelRemoved(Platform::Object^ sender, Windows::Gaming::Input::RacingWheel^ wheel);
+		void OnRawGameControllerAdded(Platform::Object^ sender, Windows::Gaming::Input::RawGameController^ controller);
 		void WheelSelectionChanged(Platform::Object^ sender,
 			Windows::UI::Xaml::Controls::SelectionChangedEventArgs^ args);
 		void WheelCheckChanged(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ args);
@@ -122,6 +123,8 @@ namespace Cemu_UWP_Host
 		void ApplyWheelConfigToUi();
 		void WheelSettingsChanged();
 		void RefreshRacingWheel();
+		void LogGameControllers(const wchar_t* reason);
+		void LogGameController(Windows::Gaming::Input::RawGameController^ controller, const wchar_t* prefix);
 		void AttachWheel(Windows::Gaming::Input::RacingWheel^ wheel);
 		void DetachWheel(const wchar_t* reason, int hresult);
 		void UpdateWheelClaim();
@@ -133,7 +136,6 @@ namespace Cemu_UWP_Host
 		void CommitInstalledGameIndex(unsigned int index);
 		void ShowWheelToast(Platform::String^ text);
 		void WheelLog(const std::wstring& message);
-		size_t GetPersistedExternalFolderCount();
 		void UpdateGamepadStatus();
 		void InitializeGlobalGamepadMappingUi();
 		void LoadGlobalGamepadMapping();
@@ -165,6 +167,7 @@ namespace Cemu_UWP_Host
 		Windows::Foundation::EventRegistrationToken m_gamepadRemovedToken{};
 		Windows::Foundation::EventRegistrationToken m_wheelAddedToken{};
 		Windows::Foundation::EventRegistrationToken m_wheelRemovedToken{};
+		Windows::Foundation::EventRegistrationToken m_rawControllerAddedToken{};
 		Windows::Foundation::EventRegistrationToken m_coreWindowKeyDownToken{};
 		Windows::Foundation::EventRegistrationToken m_coreWindowKeyUpToken{};
 		Windows::Foundation::EventRegistrationToken m_backRequestedToken{};

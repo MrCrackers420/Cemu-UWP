@@ -1,6 +1,6 @@
 # Racing wheel bridge (Thrustmaster T98) for Cemu UWP
 
-**Status:** compiles and packages on GitHub Actions (`Cemu-UWP-Host_1.0.10.100_x64.msixbundle`), and the simulated logic tests pass there. **Not tested on a physical T98, an Xbox, or Mario Kart 8.** Every hardware test below is marked NOT RUN until someone runs it on the console.
+**Status:** compiles and packages on GitHub Actions (`Cemu-UWP-Host_1.0.10.101_x64.msixbundle`), and the simulated logic tests pass there. **Not tested on a physical T98, an Xbox, or Mario Kart 8.** Every hardware test below is marked NOT RUN until someone runs it on the console.
 
 Base: `XboxEmuPorts/Cemu-UWP` at `bbaf33a`. The Cemu core (`XboxEmuPorts/Cemu`, branch `build-msvc-d3d11`) is unchanged.
 
@@ -66,7 +66,7 @@ Fetch both files with Xbox Device Portal → File explorer → `LocalAppData\<pa
 
 1. In Device Portal, copy `LocalState` from the installed Cemu package to a PC first.
 2. Install the new `.msixbundle` **over** the existing app (Device Portal → Add, with `Microsoft.VCLibs.x64.14.00.appx` as a dependency if asked). Do not uninstall: uninstalling deletes `LocalState`.
-3. The package keeps upstream's identity and signing key and is versioned `1.0.10.100`, above upstream's `1.0.10.2`, so it updates in place.
+3. The package keeps upstream's identity and signing key and is versioned `1.0.10.101`, above upstream's `1.0.10.2`, so it updates in place.
 4. If Device Portal refuses the update (different signer or a higher installed version), stop and keep the existing install.
 
 ## Tests
@@ -102,11 +102,17 @@ For any failure keep `t98_bridge.log` and `log.txt` from the same session.
 
 ## Games in DevelopmentFiles
 
-Copy games from your PC into `DevelopmentFiles\Games\wiiu` on the Xbox (the network share, or Device Portal → File explorer). On startup, and when you press **Rescan external folders**, the app opens `D:\DevelopmentFiles\Games\wiiu` (then `S:\…`) directly and lists its games as **External storage**, with no Xbox file picker.
+Copy games from your PC into `DevelopmentFiles\Games\wiiu` on the Xbox (the network share, or Device Portal → File explorer). Every library refresh (startup, **Scan local folder**) reads `D:\DevelopmentFiles\Games\wiiu` (then `S:\…`) with plain Win32 file calls, the method the `danprice142/Cemu-UWP` 0.2.6.7 port uses, and lists what it finds as **DevelopmentFiles** games, launched by path like `GamesToInstall`. The package also declares `broadFileSystemAccess`, as that port does.
 
-This uses the `broadFileSystemAccess` capability, the same one the `danprice142/Cemu-UWP` 0.2.6.7 port declares to read this folder. Microsoft's documentation says it is not supported on Xbox, so whether it works on your console is confirmed only by `t98_bridge.log`: a `[storage] … opened` line means it worked; `access denied` means the console refused.
+Supported there: WUD, WUX, ISO, WUA, WUHB, RPX, ELF files and extracted titles (`code`/`content`/`meta`, or `title.tmd`). Graphic Packs are not imported from this folder.
 
-Fallback that needs no special access: upload games with Device Portal → File explorer → `LocalAppData\<Cemu package>\LocalState\GamesToInstall`, then press **Scan local folder**.
+`t98_bridge.log` records the result as `[storage] D:\DevelopmentFiles\Games\wiiu: readable, N game(s) found` or `access denied`.
+
+Fallback: upload games with Device Portal → File explorer → `LocalAppData\<Cemu package>\LocalState\GamesToInstall`, then press **Scan local folder**.
+
+## Controller diagnostics
+
+At startup and on resume the log lists every controller the system reports (name, USB VID/PID, button/axis counts) and whether it is usable as a racing wheel, a gamepad, or a navigation controller. Each controller connected later is logged too. If the T98 shows `as racing wheel no`, the bridge cannot see it as a wheel.
 
 ## Known limits
 
