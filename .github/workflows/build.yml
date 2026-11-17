@@ -47,16 +47,19 @@ jobs:
         shell: pwsh
         run: '"key=$(git -C Cemu rev-parse HEAD)-$(git -C SDL3-uwp rev-parse HEAD)" >> $env:GITHUB_OUTPUT'
 
+      # Restore and save are separate steps so the multi-hour Cemu runtime
+      # build is cached as soon as it finishes, even when a later host step fails.
       - name: Cache Cemu
         id: cache-cemu
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: Cemu/bin
           key: cemu-bin-${{ steps.cemu-key.outputs.key }}
 
       - name: Cache vcpkg
+        id: cache-vcpkg
         if: steps.cache-cemu.outputs.cache-hit != 'true'
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: ~/AppData/Local/vcpkg/archives
           key: vcpkg-${{ hashFiles('Cemu/cmake/vcpkg-embed/vcpkg.json', 'Cemu/dependencies/vcpkg_overlay_ports*/**') }}
@@ -84,6 +87,20 @@ jobs:
             -DENABLE_D3D11=ON `
             -DENABLE_D3D12=ON
           cmake --build .\Cemu\build --config Release --target CemuBin --parallel
+
+      - name: Save vcpkg cache
+        if: always() && steps.cache-cemu.outputs.cache-hit != 'true' && steps.cache-vcpkg.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/AppData/Local/vcpkg/archives
+          key: vcpkg-${{ hashFiles('Cemu/cmake/vcpkg-embed/vcpkg.json', 'Cemu/dependencies/vcpkg_overlay_ports*/**') }}
+
+      - name: Save Cemu cache
+        if: steps.cache-cemu.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: Cemu/bin
+          key: cemu-bin-${{ steps.cemu-key.outputs.key }}
 
       - name: Set package version
         if: github.ref_type == 'tag'
