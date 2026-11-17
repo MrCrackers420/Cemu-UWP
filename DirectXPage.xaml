@@ -275,6 +275,26 @@
         </Path.RenderTransform>
       </Path>
 
+      <!-- T98 wheel bridge: brief notice over the running title (layer switch,
+           wheel connected/disconnected). Never takes focus or pointer input. -->
+      <Border x:Name="wheelToast"
+              Canvas.ZIndex="31"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Top"
+              Margin="0,28,0,0"
+              Padding="18,9"
+              CornerRadius="6"
+              Background="#E014262B"
+              BorderBrush="{StaticResource AccentBlueBrush}"
+              BorderThickness="1"
+              IsHitTestVisible="False"
+              Visibility="Collapsed">
+        <TextBlock x:Name="wheelToastText"
+                   FontSize="20"
+                   FontWeight="SemiBold"
+                   Foreground="{StaticResource TextBrush}" />
+      </Border>
+
       <Grid x:Name="tabsPanel"
             Canvas.ZIndex="10"
             HorizontalAlignment="Stretch"
@@ -643,7 +663,7 @@
                   <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource DividerBrush}" BorderThickness="1" CornerRadius="5" Padding="12">
                     <StackPanel Spacing="4">
                       <TextBlock Text="Controllers" Style="{StaticResource SectionHeadingStyle}" />
-                      <TextBlock Text="Player assignments are kept for this app session. Player 1 uses the selected Wii U controller type; players 2–4 use Wii U Pro Controller."
+                      <TextBlock Text="Player assignments are kept for this app session. Player 1 uses the selected Wii U controller type; players 2–4 use Wii U Pro Controller. A racing wheel takes the player chosen under Racing wheel below."
                                  Style="{StaticResource HelpfulTextStyle}" Margin="0,0,0,5" TextWrapping="Wrap" />
                       <TextBlock x:Name="player1ControllerStatus"
                                  Text="P1  ·  —  ·  Wii U GamePad  ·  Disconnected" />
@@ -686,6 +706,59 @@
                       <Button Content="Restore default button layout"
                               HorizontalAlignment="Left"
                               Click="ResetGamepadMapping_Click"/>
+                    </StackPanel>
+                  </Border>
+                  <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource DividerBrush}" BorderThickness="1" CornerRadius="5" Padding="12">
+                    <StackPanel Spacing="4">
+                      <TextBlock Text="Racing wheel" Style="{StaticResource SectionHeadingStyle}" />
+                      <TextBlock Text="One racing wheel is one player of its own. It never shares a player with a gamepad, and its player stays reserved while the wheel is unplugged. The global gamepad layout above does not apply to the wheel."
+                                 Style="{StaticResource HelpfulTextStyle}" Margin="0,0,0,5" TextWrapping="Wrap" />
+                      <TextBlock x:Name="wheelStatusText" Text="No racing wheel detected." TextWrapping="Wrap" />
+                      <TextBlock x:Name="wheelMonitorText" Text="Live input: no wheel"
+                                 Style="{StaticResource HelpfulTextStyle}" FontFamily="Consolas" TextWrapping="Wrap" />
+                      <Grid ColumnSpacing="16" Margin="0,6,0,0">
+                        <Grid.ColumnDefinitions>
+                          <ColumnDefinition Width="*" />
+                          <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                          <CheckBox x:Name="wheelEnabledCheck" Content="Use the racing wheel as a player" Checked="WheelCheckChanged" Unchecked="WheelCheckChanged"/>
+                          <ComboBox x:Name="wheelPlayerBox" Header="Wheel player" SelectedIndex="0" SelectionChanged="WheelSelectionChanged">
+                            <ComboBoxItem Content="Player 1"/><ComboBoxItem Content="Player 2"/><ComboBoxItem Content="Player 3"/><ComboBoxItem Content="Player 4"/>
+                          </ComboBox>
+                          <ComboBox x:Name="wheelLayerModeBox" Header="Binding layers" SelectedIndex="0" SelectionChanged="WheelSelectionChanged">
+                            <ComboBoxItem Content="Menu and racing bindings together"/><ComboBoxItem Content="Switch layers with a wheel button"/>
+                          </ComboBox>
+                          <ComboBox x:Name="wheelToggleBox" Header="Layer switch button" SelectionChanged="WheelSelectionChanged"/>
+                          <ComboBox x:Name="wheelUiNavBox" Header="Wheel navigation of this interface" SelectedIndex="0" SelectionChanged="WheelSelectionChanged">
+                            <ComboBoxItem Content="Automatic"/><ComboBoxItem Content="Always handled by Cemu"/><ComboBoxItem Content="Xbox system only"/>
+                          </ComboBox>
+                        </StackPanel>
+                        <StackPanel Grid.Column="1">
+                          <Slider x:Name="wheelSaturationSlider" Header="Wheel travel for full steering (%)" Minimum="20" Maximum="100" StepFrequency="5" Value="70" ValueChanged="WheelValueChanged"/>
+                          <Slider x:Name="wheelDeadzoneSlider" Header="Steering centre deadzone (%)" Minimum="0" Maximum="20" StepFrequency="1" Value="2" ValueChanged="WheelValueChanged"/>
+                          <Slider x:Name="wheelCompensationSlider" Header="Stick deadzone compensation (%)" Minimum="0" Maximum="40" StepFrequency="1" Value="25" ValueChanged="WheelValueChanged"/>
+                          <Slider x:Name="wheelPedalSlider" Header="Pedal press point (%)" Minimum="5" Maximum="90" StepFrequency="5" Value="30" ValueChanged="WheelValueChanged"/>
+                          <CheckBox x:Name="wheelInvertCheck" Content="Invert steering" Checked="WheelCheckChanged" Unchecked="WheelCheckChanged"/>
+                        </StackPanel>
+                      </Grid>
+                      <Grid ColumnSpacing="16" Margin="0,6,0,0">
+                        <Grid.ColumnDefinitions>
+                          <ColumnDefinition Width="*" />
+                          <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel x:Name="wheelMenuBindingsPanel">
+                          <TextBlock Text="Menu layer bindings" FontWeight="SemiBold" />
+                        </StackPanel>
+                        <StackPanel x:Name="wheelRaceBindingsPanel" Grid.Column="1">
+                          <TextBlock Text="Racing layer bindings" FontWeight="SemiBold" />
+                          <TextBlock Text="Steering is the analog left stick whenever the racing layer is active."
+                                     Style="{StaticResource HelpfulTextStyle}" TextWrapping="Wrap" />
+                        </StackPanel>
+                      </Grid>
+                      <Button Content="Restore default wheel bindings"
+                              HorizontalAlignment="Left"
+                              Click="ResetWheelBindings_Click"/>
                     </StackPanel>
                   </Border>
                   <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource DividerBrush}" BorderThickness="1" CornerRadius="5" Padding="12">

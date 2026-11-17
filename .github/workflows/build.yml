@@ -17,6 +17,17 @@ jobs:
         with:
           path: Cemu-UWP
 
+      # T98 wheel bridge: compile and run the platform-independent logic first.
+      # These are simulated tests only; they involve no wheel, console or game.
+      - name: Simulated wheel-bridge tests
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+          if not defined VSINSTALL (echo Visual Studio C++ tools were not found & exit /b 1)
+          call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cl /nologo /std:c++14 /EHsc /W4 /utf-8 /Fe:t98_tests.exe /Fo:t98_tests.obj Cemu-UWP\tests\t98_bridge_tests.cpp || exit /b 1
+          t98_tests.exe || exit /b 1
+
       - name: Checkout Cemu
         uses: actions/checkout@v7
         with:
@@ -98,7 +109,16 @@ jobs:
             "/p:AppxPackageDir=$packageDir" `
             /p:UapAppxPackageBuildMode=SideloadOnly `
             /p:GenerateAppxPackageOnBuild=true `
-            /p:GenerateAppInstallerFile=false
+            /p:GenerateAppInstallerFile=false `
+            "/flp:logfile=$env:GITHUB_WORKSPACE\msbuild-host.log;verbosity=normal;encoding=UTF-8"
+
+      - name: Upload host build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: host-build-log
+          path: msbuild-host.log
+          if-no-files-found: ignore
 
       - name: Stage artifacts
         shell: pwsh

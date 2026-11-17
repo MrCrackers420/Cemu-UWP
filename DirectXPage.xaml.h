@@ -3,6 +3,7 @@
 #include "DirectXPage.g.h"
 #include "Cemu_UWP_HostMain.h"
 #include "Common/DeviceResources.h"
+#include "T98Bridge.h"
 #include <array>
 #include <chrono>
 #include <string>
@@ -37,6 +38,15 @@ namespace Cemu_UWP_Host
 		void OnRendering(Platform::Object^ sender, Platform::Object^ args);
 		void OnGamepadAdded(Platform::Object^ sender, Windows::Gaming::Input::Gamepad^ gamepad);
 		void OnGamepadRemoved(Platform::Object^ sender, Windows::Gaming::Input::Gamepad^ gamepad);
+		// T98_BRIDGE_V2: one racing wheel acts as one independent player.
+		void OnRacingWheelAdded(Platform::Object^ sender, Windows::Gaming::Input::RacingWheel^ wheel);
+		void OnRacingWheelRemoved(Platform::Object^ sender, Windows::Gaming::Input::RacingWheel^ wheel);
+		void WheelSelectionChanged(Platform::Object^ sender,
+			Windows::UI::Xaml::Controls::SelectionChangedEventArgs^ args);
+		void WheelCheckChanged(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ args);
+		void WheelValueChanged(Platform::Object^ sender,
+			Windows::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs^ args);
+		void ResetWheelBindings_Click(Platform::Object^ sender, Windows::UI::Xaml::RoutedEventArgs^ args);
 		void OnCoreWindowKeyDown(Windows::UI::Core::CoreWindow^ sender,
 			Windows::UI::Core::KeyEventArgs^ args);
 		void OnBackRequested(Platform::Object^ sender,
@@ -105,6 +115,24 @@ namespace Cemu_UWP_Host
 		int AssignGamepadSlot(Windows::Gaming::Input::Gamepad^ gamepad);
 		void DisconnectGamepadSlot(size_t slot);
 		void RefreshGamepads();
+		void PublishSlotDisconnected(size_t slot);
+		void InitializeWheelBridge();
+		void LoadWheelSettings();
+		void SaveWheelSettings();
+		void ApplyWheelConfigToUi();
+		void WheelSettingsChanged();
+		void RefreshRacingWheel();
+		void AttachWheel(Windows::Gaming::Input::RacingWheel^ wheel);
+		void DetachWheel(const wchar_t* reason, int hresult);
+		void UpdateWheelClaim();
+		T98::WheelInput ReadWheelInput();
+		void UpdateWheelStatus();
+		void UpdateWheelMonitor();
+		void UpdateWheelUiNavigation();
+		void ExecuteWheelUiAction(uint32_t action);
+		void CommitInstalledGameIndex(unsigned int index);
+		void ShowWheelToast(Platform::String^ text);
+		void WheelLog(const std::wstring& message);
 		void UpdateGamepadStatus();
 		void InitializeGlobalGamepadMappingUi();
 		void LoadGlobalGamepadMapping();
@@ -134,6 +162,8 @@ namespace Cemu_UWP_Host
 		Windows::Foundation::EventRegistrationToken m_renderingToken{};
 		Windows::Foundation::EventRegistrationToken m_gamepadAddedToken{};
 		Windows::Foundation::EventRegistrationToken m_gamepadRemovedToken{};
+		Windows::Foundation::EventRegistrationToken m_wheelAddedToken{};
+		Windows::Foundation::EventRegistrationToken m_wheelRemovedToken{};
 		Windows::Foundation::EventRegistrationToken m_coreWindowKeyDownToken{};
 		Windows::Foundation::EventRegistrationToken m_coreWindowKeyUpToken{};
 		Windows::Foundation::EventRegistrationToken m_backRequestedToken{};
@@ -141,10 +171,30 @@ namespace Cemu_UWP_Host
 		// Gamepad::Gamepads on every composition frame re-enters Xbox PnP/user
 		// association code and can produce E_INVALIDARG/E_ACCESSDENIED failures.
 		std::array<Windows::Gaming::Input::Gamepad^, CEMU_EMBED_MAX_GAMEPADS> m_gamepads{};
-		std::array<std::wstring, CEMU_EMBED_MAX_GAMEPADS> m_gamepadIds{};
-		std::array<std::wstring, CEMU_EMBED_MAX_GAMEPADS> m_gamepadNames{};
-		std::array<uint64_t, CEMU_EMBED_MAX_GAMEPADS> m_gamepadDisconnectedOrder{};
-		uint64_t m_gamepadDisconnectSequence = 0;
+		// T98_BRIDGE_V2: player-slot ownership lives in the platform-independent
+		// table so the wheel's slot can never be shared with a gamepad.
+		// m_gamepads[i] is non-null exactly when m_slots.connected[i] is true.
+		T98::SlotTable m_slots;
+		// The wheel, like the gamepads, is only touched on the XAML apartment.
+		Windows::Gaming::Input::RacingWheel^ m_wheel = nullptr;
+		Windows::Gaming::Input::UINavigationController^ m_wheelNav = nullptr;
+		std::wstring m_wheelId;
+		std::wstring m_wheelName;
+		T98::Config m_wheelConfig;
+		T98::Mapper m_wheelMapper;
+		T98::UiNavigator m_wheelUiNavigator;
+		T98::WheelInput m_lastWheelInput;
+		T98::PadState m_lastWheelPad;
+		uint64_t m_lastWheelSources = 0;
+		std::array<std::array<Windows::UI::Xaml::Controls::ComboBox^, T98::kTargetCount>, T98::kLayerCount>
+			m_wheelBindingBoxes{};
+		bool m_wheelSeen = false;
+		bool m_wheelUiReady = false;
+		bool m_loadingWheelSettings = false;
+		bool m_wheelClaimDeferredLogged = false;
+		bool m_wheelHostNavigationLogged = false;
+		uint64_t m_wheelToastUntilMs = 0;
+		unsigned int m_wheelMonitorFrames = 0;
 		Windows::UI::Core::CoreCursor^ m_savedSystemPointerCursor = nullptr;
 		bool m_systemPointerHidden = false;
 		bool m_cemuReady = false;

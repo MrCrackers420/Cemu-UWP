@@ -8,6 +8,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <iomanip>
 #include <sstream>
@@ -404,6 +405,139 @@ uint32_t NormalizeGamepadButtons(GamepadButtons buttons)
 	return result;
 }
 
+// T98_BRIDGE_V2 helpers. The wheel is read through three WGI projections of the
+// same device: RacingWheel (steering, pedals, paddles, numbered buttons),
+// UINavigationController (A/B/X/Y/Menu/View/D-pad with fixed meaning on every
+// Xbox wheel) and RawGameController (identity and display name only).
+uint32_t NormalizeWheelButtons(RacingWheelButtons buttons)
+{
+	const auto bits = static_cast<unsigned int>(buttons);
+	auto has = [bits](RacingWheelButtons button) -> bool
+	{
+		return (bits & static_cast<unsigned int>(button)) != 0;
+	};
+	uint32_t result = 0;
+	if (has(RacingWheelButtons::PreviousGear)) result |= T98::kWheelBitPaddleLeft;
+	if (has(RacingWheelButtons::NextGear)) result |= T98::kWheelBitPaddleRight;
+	if (has(RacingWheelButtons::DPadUp)) result |= T98::kWheelBitDpadUp;
+	if (has(RacingWheelButtons::DPadDown)) result |= T98::kWheelBitDpadDown;
+	if (has(RacingWheelButtons::DPadLeft)) result |= T98::kWheelBitDpadLeft;
+	if (has(RacingWheelButtons::DPadRight)) result |= T98::kWheelBitDpadRight;
+	const RacingWheelButtons numbered[16] = {
+		RacingWheelButtons::Button1, RacingWheelButtons::Button2,
+		RacingWheelButtons::Button3, RacingWheelButtons::Button4,
+		RacingWheelButtons::Button5, RacingWheelButtons::Button6,
+		RacingWheelButtons::Button7, RacingWheelButtons::Button8,
+		RacingWheelButtons::Button9, RacingWheelButtons::Button10,
+		RacingWheelButtons::Button11, RacingWheelButtons::Button12,
+		RacingWheelButtons::Button13, RacingWheelButtons::Button14,
+		RacingWheelButtons::Button15, RacingWheelButtons::Button16
+	};
+	for (uint32_t index = 0; index < 16; ++index)
+		if (has(numbered[index])) result |= T98::kWheelBitButton1 << index;
+	return result;
+}
+
+uint32_t NormalizeWheelNavigation(RequiredUINavigationButtons required,
+	OptionalUINavigationButtons optional)
+{
+	const auto requiredBits = static_cast<unsigned int>(required);
+	const auto optionalBits = static_cast<unsigned int>(optional);
+	auto hasRequired = [requiredBits](RequiredUINavigationButtons button) -> bool
+	{
+		return (requiredBits & static_cast<unsigned int>(button)) != 0;
+	};
+	auto hasOptional = [optionalBits](OptionalUINavigationButtons button) -> bool
+	{
+		return (optionalBits & static_cast<unsigned int>(button)) != 0;
+	};
+	uint32_t result = 0;
+	if (hasRequired(RequiredUINavigationButtons::Menu)) result |= T98::kNavMenu;
+	if (hasRequired(RequiredUINavigationButtons::View)) result |= T98::kNavView;
+	if (hasRequired(RequiredUINavigationButtons::Accept)) result |= T98::kNavAccept;
+	if (hasRequired(RequiredUINavigationButtons::Cancel)) result |= T98::kNavCancel;
+	if (hasRequired(RequiredUINavigationButtons::Up)) result |= T98::kNavUp;
+	if (hasRequired(RequiredUINavigationButtons::Down)) result |= T98::kNavDown;
+	if (hasRequired(RequiredUINavigationButtons::Left)) result |= T98::kNavLeft;
+	if (hasRequired(RequiredUINavigationButtons::Right)) result |= T98::kNavRight;
+	if (hasOptional(OptionalUINavigationButtons::Context1)) result |= T98::kNavContext1;
+	if (hasOptional(OptionalUINavigationButtons::Context2)) result |= T98::kNavContext2;
+	return result;
+}
+
+std::wstring WheelIdentity(RacingWheel^ wheel)
+{
+	if (!wheel)
+		return {};
+	try
+	{
+		auto raw = RawGameController::FromGameController(wheel);
+		auto value = raw ? raw->NonRoamableId : nullptr;
+		return value ? std::wstring(value->Data(), value->Length()) : std::wstring();
+	}
+	catch (Platform::Exception^)
+	{
+		return {};
+	}
+}
+
+std::wstring WheelDisplayName(RacingWheel^ wheel)
+{
+	if (!wheel)
+		return {};
+	try
+	{
+		auto raw = RawGameController::FromGameController(wheel);
+		auto value = raw ? raw->DisplayName : nullptr;
+		return value ? std::wstring(value->Data(), value->Length()) : std::wstring();
+	}
+	catch (Platform::Exception^)
+	{
+		return {};
+	}
+}
+
+// Wheel events are rare, so every line is appended and flushed immediately:
+// the log survives a crash or a forced app termination. It lives next to
+// Cemu's own log in LocalState and is never deleted by the app.
+void WriteWheelLogLine(const std::wstring& message)
+{
+	const std::wstring debugLine = L"[Cemu/UWP host][T98] " + message + L"\n";
+	OutputDebugStringW(debugLine.c_str());
+	try
+	{
+		static std::wstring path;
+		if (path.empty())
+		{
+			auto folder = ApplicationData::Current->LocalFolder->Path;
+			path = std::wstring(folder->Data(), folder->Length()) + L"\\t98_bridge.log";
+			WIN32_FILE_ATTRIBUTE_DATA info{};
+			if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info) &&
+				(info.nFileSizeHigh != 0 || info.nFileSizeLow > 1024u * 1024u))
+			{
+				// Keep exactly one previous generation instead of truncating.
+				const std::wstring previous = path + L".old";
+				MoveFileExW(path.c_str(), previous.c_str(), MOVEFILE_REPLACE_EXISTING);
+			}
+		}
+		FILE* file = nullptr;
+		if (_wfopen_s(&file, path.c_str(), L"a, ccs=UTF-8") != 0 || !file)
+			return;
+		SYSTEMTIME now{};
+		GetLocalTime(&now);
+		fwprintf(file, L"%04u-%02u-%02u %02u:%02u:%02u.%03u  %s\n",
+			static_cast<unsigned int>(now.wYear), static_cast<unsigned int>(now.wMonth),
+			static_cast<unsigned int>(now.wDay), static_cast<unsigned int>(now.wHour),
+			static_cast<unsigned int>(now.wMinute), static_cast<unsigned int>(now.wSecond),
+			static_cast<unsigned int>(now.wMilliseconds), message.c_str());
+		fclose(file);
+	}
+	catch (...)
+	{
+		// Logging must never interrupt input handling.
+	}
+}
+
 double ApplyStickDeadzone(double value)
 {
 	constexpr double deadzone = 0.18;
@@ -487,6 +621,7 @@ DirectXPage::DirectXPage()
 	InitializeComponent();
 	Localization::Attach(this);
 	InitializeGlobalGamepadMappingUi();
+	InitializeWheelBridge();
 	m_lastAppliedGamepadRumble.fill(-1.0f);
 	ConfigureXboxUiScale();
 	// Registering WGI events on the XAML thread. The host mirrors a plain
@@ -496,6 +631,10 @@ DirectXPage::DirectXPage()
 		Gamepad::GamepadAdded += ref new EventHandler<Gamepad^>(this, &DirectXPage::OnGamepadAdded);
 	m_gamepadRemovedToken =
 		Gamepad::GamepadRemoved += ref new EventHandler<Gamepad^>(this, &DirectXPage::OnGamepadRemoved);
+	m_wheelAddedToken =
+		RacingWheel::RacingWheelAdded += ref new EventHandler<RacingWheel^>(this, &DirectXPage::OnRacingWheelAdded);
+	m_wheelRemovedToken =
+		RacingWheel::RacingWheelRemoved += ref new EventHandler<RacingWheel^>(this, &DirectXPage::OnRacingWheelRemoved);
 	// Xbox also projects controller buttons as CoreWindow keys. Consume that
 	// parallel XAML navigation route while a title is running; otherwise B can
 	// become a system Back request even though the same button was already sent
@@ -511,6 +650,9 @@ DirectXPage::DirectXPage()
 		ref new EventHandler<BackRequestedEventArgs^>(this, &DirectXPage::OnBackRequested);
 	// Added is not guaranteed to be replayed for controllers connected before
 	// app startup. Enumerate once, then keep stable apartment-owned player slots.
+	// The wheel is enumerated first so its player is reserved before any
+	// gamepad is given a slot.
+	RefreshRacingWheel();
 	RefreshGamepads();
 	m_renderingToken =
 		CompositionTarget::Rendering += ref new EventHandler<Platform::Object^>(this, &DirectXPage::OnRendering);
@@ -643,6 +785,8 @@ DirectXPage::~DirectXPage()
 	CompositionTarget::Rendering -= m_renderingToken;
 	Gamepad::GamepadAdded -= m_gamepadAddedToken;
 	Gamepad::GamepadRemoved -= m_gamepadRemovedToken;
+	RacingWheel::RacingWheelAdded -= m_wheelAddedToken;
+	RacingWheel::RacingWheelRemoved -= m_wheelRemovedToken;
 	Window::Current->CoreWindow->KeyDown -= m_coreWindowKeyDownToken;
 	Window::Current->CoreWindow->KeyUp -= m_coreWindowKeyUpToken;
 	SystemNavigationManager::GetForCurrentView()->BackRequested -= m_backRequestedToken;
@@ -658,6 +802,17 @@ void DirectXPage::ShutdownRuntime()
 	SetExternalLoadingVisible(false);
 	for (size_t slot = 0; slot < m_gamepads.size(); ++slot)
 		DisconnectGamepadSlot(slot);
+	// Drop the wheel handle but keep its player reserved; every player is
+	// published as disconnected below.
+	if (m_wheel)
+		WheelLog(L"Runtime suspended; wheel handle released.");
+	m_wheel = nullptr;
+	m_wheelNav = nullptr;
+	m_lastWheelInput = T98::WheelInput{};
+	m_lastWheelPad = T98::PadState{};
+	m_lastWheelSources = 0;
+	m_wheelMapper.Reset();
+	m_wheelUiNavigator.Reset();
 	if (m_main)
 	{
 		m_main->SetVirtualMouse(0, 0, false, false);
@@ -693,6 +848,7 @@ void DirectXPage::ResumeRuntime()
 	if (!m_runtimeSuspended)
 		return;
 	m_runtimeSuspended = false;
+	RefreshRacingWheel();
 	RefreshGamepads();
 	InitializeEmulator(static_cast<float>(emulatorSurface->ActualWidth),
 		static_cast<float>(emulatorSurface->ActualHeight));
@@ -775,67 +931,30 @@ int DirectXPage::AssignGamepadSlot(Gamepad^ gamepad)
 	StopGamepadVibration(gamepad);
 	const auto identity = GetGamepadIdentity(gamepad);
 	const auto displayName = GetGamepadDisplayName(gamepad);
-	if (!identity.empty())
-	{
-		for (size_t index = 0; index < m_gamepadIds.size(); ++index)
-		{
-			if (m_gamepadIds[index] != identity)
-				continue;
-			// A reconnect may be represented by a new WinRT object. Replace the old
-			// handle in-place; a delayed removal event for that stale object then
-			// cannot clear the newly reconnected controller.
-			if (m_gamepads[index] && m_gamepads[index] != gamepad)
-				DisconnectGamepadSlot(index); // Publish the disconnect before replacement.
-			m_gamepads[index] = gamepad;
-			m_gamepadDisconnectedOrder[index] = 0;
-			if (!displayName.empty())
-				m_gamepadNames[index] = displayName;
-			m_hasPublishedGamepadStates[index] = false;
-			m_lastAppliedGamepadRumble[index] = -1.0f;
-			return static_cast<int>(index);
-		}
-	}
+	// A reconnect may be represented by a new WinRT object. Replace the old
+	// handle in-place; a delayed removal event for that stale object then
+	// cannot clear the newly reconnected controller.
+	const int remembered = m_slots.FindIdentity(identity);
+	if (remembered >= 0 && m_gamepads[remembered] && m_gamepads[remembered] != gamepad)
+		DisconnectGamepadSlot(static_cast<size_t>(remembered)); // Publish the disconnect before replacement.
 
-	// Prefer a slot that has never belonged to another physical controller.
-	for (size_t index = 0; index < m_gamepads.size(); ++index)
+	// The table prefers the pad's remembered slot, then a never-used slot, then
+	// the oldest disconnected reservation. It never returns the wheel's slot
+	// and never accepts the wheel's own device as a second player.
+	const auto assigned = m_slots.Assign(identity, displayName);
+	if (assigned.slot < 0)
 	{
-		if (m_gamepads[index] != nullptr || !m_gamepadIds[index].empty())
-			continue;
-		m_gamepads[index] = gamepad;
-		m_gamepadIds[index] = identity;
-		m_gamepadNames[index] = displayName;
-		m_gamepadDisconnectedOrder[index] = 0;
-		m_hasPublishedGamepadStates[index] = false;
-		m_lastAppliedGamepadRumble[index] = -1.0f;
-		return static_cast<int>(index);
+		if (!identity.empty() && identity == m_slots.blockedIdentity)
+			WheelLog(L"Ignored the gamepad projection of the wheel; the wheel stays a single player.");
+		else
+			WheelLog(L"A gamepad connected but no player slot is free; it was not assigned.");
+		return -1;
 	}
-
-	// All player identities have been seen already. Let a genuinely new pad
-	// replace the oldest disconnected reservation instead of requiring a restart.
-	size_t replacement = m_gamepads.size();
-	uint64_t oldestOrder = std::numeric_limits<uint64_t>::max();
-	for (size_t index = 0; index < m_gamepads.size(); ++index)
-	{
-		if (m_gamepads[index] != nullptr)
-			continue;
-		const auto order = m_gamepadDisconnectedOrder[index];
-		if (replacement == m_gamepads.size() || (order != 0 && order < oldestOrder))
-		{
-			replacement = index;
-			oldestOrder = order == 0 ? std::numeric_limits<uint64_t>::max() : order;
-		}
-	}
-	if (replacement != m_gamepads.size())
-	{
-		m_gamepads[replacement] = gamepad;
-		m_gamepadIds[replacement] = identity;
-		m_gamepadNames[replacement] = displayName;
-		m_gamepadDisconnectedOrder[replacement] = 0;
-		m_hasPublishedGamepadStates[replacement] = false;
-		m_lastAppliedGamepadRumble[replacement] = -1.0f;
-		return static_cast<int>(replacement);
-	}
-	return -1;
+	const size_t slot = static_cast<size_t>(assigned.slot);
+	m_gamepads[slot] = gamepad;
+	m_hasPublishedGamepadStates[slot] = false;
+	m_lastAppliedGamepadRumble[slot] = -1.0f;
+	return assigned.slot;
 }
 
 void DirectXPage::StopGamepadVibration(Gamepad^ gamepad)
@@ -860,13 +979,23 @@ void DirectXPage::DisconnectGamepadSlot(size_t slot)
 {
 	if (slot >= m_gamepads.size())
 		return;
+	// The wheel's player is not a gamepad slot; gamepad bookkeeping must never
+	// disturb it.
+	if (static_cast<int>(slot) == m_slots.reserved)
+		return;
 	if (m_gamepads[slot])
 	{
 		StopGamepadVibration(m_gamepads[slot]);
 		m_gamepads[slot] = nullptr;
-		if (!m_gamepadIds[slot].empty())
-			m_gamepadDisconnectedOrder[slot] = ++m_gamepadDisconnectSequence;
 	}
+	m_slots.Disconnect(static_cast<int>(slot));
+	PublishSlotDisconnected(slot);
+}
+
+void DirectXPage::PublishSlotDisconnected(size_t slot)
+{
+	if (slot >= m_gamepads.size())
+		return;
 	// Clear the core's connected state and rumble immediately, not one frame
 	// later. This also covers a replacement WinRT object with the same identity.
 	if (m_main)
@@ -925,9 +1054,22 @@ void DirectXPage::OnRendering(Platform::Object^, Platform::Object^)
 	}
 	m_optionsChordHeld = optionsChord;
 	UpdateVirtualMouse(gamepadState);
+	UpdateWheelUiNavigation();
+	if (m_wheelToastUntilMs != 0 && GetTickCount64() >= m_wheelToastUntilMs)
+	{
+		m_wheelToastUntilMs = 0;
+		wheelToast->Visibility = CollapsedValue;
+	}
+	if (++m_wheelMonitorFrames >= 6)
+	{
+		m_wheelMonitorFrames = 0;
+		UpdateWheelMonitor();
+	}
 	if (++m_controllerPollFrames >= 60)
 	{
 		m_controllerPollFrames = 0;
+		// A claim that had to wait for a running game is retried here.
+		UpdateWheelClaim();
 		UpdateGamepadStatus();
 	}
 	// A controller profile changes Cemu's input topology.  On Xbox this must
@@ -987,6 +1129,24 @@ void DirectXPage::OnCoreWindowKeyDown(CoreWindow^, KeyEventArgs^ args)
 {
 	if (!args || !IsGamepadVirtualKey(args->VirtualKey))
 		return;
+	// Remember navigation keys the Xbox shell projects, so a wheel press that
+	// the system already turned into XAML navigation is not handled twice.
+	if (!args->KeyStatus.IsKeyReleased)
+	{
+		uint32_t action = 0;
+		switch (args->VirtualKey)
+		{
+		case VirtualKey::GamepadDPadUp: action = T98::UiNavigator::ActionUp; break;
+		case VirtualKey::GamepadDPadDown: action = T98::UiNavigator::ActionDown; break;
+		case VirtualKey::GamepadDPadLeft: action = T98::UiNavigator::ActionLeft; break;
+		case VirtualKey::GamepadDPadRight: action = T98::UiNavigator::ActionRight; break;
+		case VirtualKey::GamepadA: action = T98::UiNavigator::ActionAccept; break;
+		case VirtualKey::GamepadB: action = T98::UiNavigator::ActionCancel; break;
+		default: break;
+		}
+		if (action != 0)
+			m_wheelUiNavigator.OnSystemKey(action, GetTickCount64());
+	}
 	// While the options panel is open, projected D-pad/A keys belong to XAML and
 	// the WGI snapshot sent to Cemu is neutral. With the panel hidden, every
 	// gamepad key belongs exclusively to the emulated Wii U controller.
@@ -1677,6 +1837,18 @@ void DirectXPage::InstalledGames_ItemClick(Platform::Object^,
 		UpdateStartButton();
 		break;
 	}
+}
+
+void DirectXPage::CommitInstalledGameIndex(unsigned int index)
+{
+	// Same commit as InstalledGames_ItemClick, for wheel-driven confirmation.
+	if (m_libraryBusy || index >= installedGamesList->Items->Size)
+		return;
+	if (index < m_installedTitles.size())
+		m_selectedTitleId = m_installedTitles[index].titleId;
+	installedGamesList->SelectedIndex = static_cast<int>(index);
+	launchStatus->Text = "Ready to start";
+	UpdateStartButton();
 }
 
 void DirectXPage::StartGame_Click(Platform::Object^, RoutedEventArgs^)
@@ -2829,15 +3001,23 @@ void DirectXPage::UpdateGamepadStatus()
 		player1ControllerStatus, player2ControllerStatus,
 		player3ControllerStatus, player4ControllerStatus
 	};
+	UpdateWheelStatus();
 	for (size_t index = 0; index < rows.size(); ++index)
 	{
-		const bool connected = m_gamepads[index] != nullptr;
+		const bool wheelPlayer = static_cast<int>(index) == m_slots.reserved;
+		const bool connected = wheelPlayer ? m_wheel != nullptr : m_gamepads[index] != nullptr;
 		auto type = Localization::GetLiteral(index == 0
 			? controllerTypes[playerOneType] : L"Wii U Pro Controller");
 		auto state = Localization::GetLiteral(connected ? L"Connected" : L"Disconnected");
 		Platform::String^ name = nullptr;
-		if (!m_gamepadNames[index].empty())
-			name = ref new Platform::String(m_gamepadNames[index].c_str());
+		if (wheelPlayer)
+		{
+			const std::wstring wheelLabel =
+				(m_wheelName.empty() ? std::wstring(L"Racing wheel") : m_wheelName) + L" (wheel)";
+			name = ref new Platform::String(wheelLabel.c_str());
+		}
+		else if (!m_slots.names[index].empty())
+			name = ref new Platform::String(m_slots.names[index].c_str());
 		else if (connected)
 			name = Localization::GetLiteral(L"Xbox controller");
 		else
@@ -2853,6 +3033,8 @@ void DirectXPage::UpdateGamepadStatus()
 	for (const auto gamepad : m_gamepads)
 		if (gamepad != nullptr)
 			++connectedCount;
+	if (m_slots.reserved >= 0 && m_wheel != nullptr)
+		++connectedCount;
 	if (connectedCount == 0)
 	{
 		controllerStatus->Text = "Controller disconnected";
@@ -3054,6 +3236,33 @@ CemuEmbedGamepadState DirectXPage::PublishGamepadStates()
 	CemuEmbedGamepadState primaryState{};
 	primaryState.struct_size = sizeof(primaryState);
 	primaryState.abi_version = CEMU_EMBED_GAMEPAD_VERSION;
+	// T98_BRIDGE_V2: sample the wheel once per call. Its state goes to exactly
+	// one player - the slot reserved for it - and is never merged with a gamepad.
+	T98::WheelInput wheelInput;
+	T98::PadState wheelPad;
+	uint64_t wheelSources = 0;
+	if (m_wheel && m_wheelConfig.enabled)
+	{
+		wheelInput = ReadWheelInput(); // detaches the wheel if the device is gone
+		if (wheelInput.valid)
+		{
+			bool layerToggled = false;
+			wheelSources = m_wheelMapper.ActiveSources(wheelInput, m_wheelConfig);
+			const uint32_t layers = m_wheelMapper.UpdateLayers(
+				wheelSources, m_wheelConfig, m_gameRunning, &layerToggled);
+			wheelPad = T98::Mapper::BuildPad(wheelInput, wheelSources, layers, m_wheelConfig);
+			if (layerToggled)
+			{
+				const bool racing = m_wheelMapper.ActiveLayer() == T98::LayerRace;
+				ShowWheelToast(WinRtString(racing ? L"Wheel: racing layer" : L"Wheel: menu layer"));
+				WheelLog(racing ? L"Layer switched to racing." : L"Layer switched to menu.");
+			}
+		}
+	}
+	m_lastWheelInput = wheelInput;
+	m_lastWheelPad = wheelPad;
+	m_lastWheelSources = wheelSources;
+	const int wheelSlot = m_slots.reserved;
 	if (!m_main)
 		return primaryState;
 
@@ -3062,8 +3271,24 @@ CemuEmbedGamepadState DirectXPage::PublishGamepadStates()
 		CemuEmbedGamepadState state{};
 		state.struct_size = sizeof(state);
 		state.abi_version = CEMU_EMBED_GAMEPAD_VERSION;
-		auto gamepad = m_gamepads[playerIndex];
-		if (gamepad)
+		const bool wheelPlayer = static_cast<int>(playerIndex) == wheelSlot;
+		Gamepad^ gamepad = nullptr;
+		if (!wheelPlayer)
+			gamepad = m_gamepads[playerIndex];
+		if (wheelPlayer)
+		{
+			// Disconnected (all zero) whenever the wheel is absent, so its
+			// inputs are released the moment it is unplugged.
+			if (wheelInput.valid)
+			{
+				state.connected = 1;
+				state.buttons = wheelPad.buttons;
+				state.left_x = wheelPad.leftX;
+				state.left_trigger = wheelPad.leftTrigger;
+				state.right_trigger = wheelPad.rightTrigger;
+			}
+		}
+		else if (gamepad)
 		{
 			try
 			{
@@ -3085,14 +3310,18 @@ CemuEmbedGamepadState DirectXPage::PublishGamepadStates()
 			}
 		}
 
-		if (playerIndex == 0)
+		// Host shortcuts and the virtual mouse belong to player one's gamepad.
+		// The wheel's gameplay state is already remapped and must not drive them.
+		if (playerIndex == 0 && !wheelPlayer)
 			primaryState = state;
 
 		// Do not let UI navigation also control the running Wii U title. Keep
 		// every device connected, but first apply the single host-owned gameplay
 		// layout shared by P1-P4. primaryState above deliberately remains raw so
 		// host UI shortcuts and the virtual mouse never inherit gameplay remaps.
-		auto publishedState = ApplyGlobalGamepadMapping(state);
+		// The wheel has its own binding layers; the global Xbox layout applies
+		// to gamepads only.
+		auto publishedState = wheelPlayer ? state : ApplyGlobalGamepadMapping(state);
 		// Publish neutral readings while options own
 		// controller navigation.
 		if (m_gameRunning && tabsPanel->Visibility == VisibleValue)
@@ -3113,6 +3342,15 @@ CemuEmbedGamepadState DirectXPage::PublishGamepadStates()
 			m_lastPublishedGamepadStates[playerIndex] = publishedState;
 			m_hasPublishedGamepadStates[playerIndex] = true;
 		}
+	}
+	// The host's View+Menu shortcut also works from the wheel's physical View
+	// and Menu buttons, whichever player the wheel is.
+	if (wheelInput.valid)
+	{
+		if ((wheelInput.nav & T98::kNavView) != 0)
+			primaryState.buttons |= 1u << 4;
+		if ((wheelInput.nav & T98::kNavMenu) != 0)
+			primaryState.buttons |= 1u << 6;
 	}
 	return primaryState;
 }
@@ -3265,4 +3503,796 @@ void DirectXPage::SaveInternalState(Windows::Foundation::Collections::IPropertyS
 void DirectXPage::LoadInternalState(Windows::Foundation::Collections::IPropertySet^ state)
 {
 	(void)state;
+}
+
+// ---------------------------------------------------------------------------
+// T98_BRIDGE_V2: one racing wheel as one independent Wii U player.
+//
+// Ownership rules (enforced by T98::SlotTable, see T98Bridge.h):
+//   * the wheel owns exactly one player slot and never shares it;
+//   * gamepads are never assigned to the wheel's slot, also while the wheel
+//     is unplugged, so nobody inherits its player;
+//   * unplugging the wheel publishes a disconnected state for its player at
+//     once and leaves every other player untouched.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+constexpr wchar_t kWheelSettingEnabled[] = L"T98_Enabled";
+constexpr wchar_t kWheelSettingPlayer[] = L"T98_Player";
+constexpr wchar_t kWheelSettingLayerMode[] = L"T98_LayerMode";
+constexpr wchar_t kWheelSettingToggle[] = L"T98_LayerToggleSource";
+constexpr wchar_t kWheelSettingUiNav[] = L"T98_UiNavigationMode";
+constexpr wchar_t kWheelSettingInvert[] = L"T98_InvertSteering";
+constexpr wchar_t kWheelSettingPedal[] = L"T98_PedalThreshold";
+constexpr wchar_t kWheelSettingDeadzone[] = L"T98_SteeringDeadzone";
+constexpr wchar_t kWheelSettingSaturation[] = L"T98_SteeringSaturation";
+constexpr wchar_t kWheelSettingCompensation[] = L"T98_CoreDeadzoneCompensation";
+
+std::wstring WheelBindingKey(size_t layer, size_t target)
+{
+	return L"T98_Binding_" + std::to_wstring(layer) + L"_" + std::to_wstring(target);
+}
+
+int32_t ReadWheelInt(Windows::Foundation::Collections::IPropertySet^ values,
+	const wchar_t* name, int32_t fallback)
+{
+	auto key = ref new Platform::String(name);
+	if (!values->HasKey(key))
+		return fallback;
+	auto property = dynamic_cast<IPropertyValue^>(values->Lookup(key));
+	return property && property->Type == PropertyType::Int32 ? property->GetInt32() : fallback;
+}
+
+double ReadWheelDouble(Windows::Foundation::Collections::IPropertySet^ values,
+	const wchar_t* name, double fallback)
+{
+	auto key = ref new Platform::String(name);
+	if (!values->HasKey(key))
+		return fallback;
+	auto property = dynamic_cast<IPropertyValue^>(values->Lookup(key));
+	return property && property->Type == PropertyType::Double ? property->GetDouble() : fallback;
+}
+
+bool ReadWheelBool(Windows::Foundation::Collections::IPropertySet^ values,
+	const wchar_t* name, bool fallback)
+{
+	auto key = ref new Platform::String(name);
+	if (!values->HasKey(key))
+		return fallback;
+	auto property = dynamic_cast<IPropertyValue^>(values->Lookup(key));
+	return property && property->Type == PropertyType::Boolean ? property->GetBoolean() : fallback;
+}
+
+std::wstring WheelPlayerLabel(int player)
+{
+	return L"Player " + std::to_wstring(player + 1);
+}
+}
+
+void DirectXPage::WheelLog(const std::wstring& message)
+{
+	WriteWheelLogLine(message);
+}
+
+void DirectXPage::InitializeWheelBridge()
+{
+	LoadWheelSettings();
+	for (int32_t source = 0; source < T98::SourceCount; ++source)
+		wheelToggleBox->Items->Append(WinRtString(T98::SourceName(source)));
+	for (size_t layer = 0; layer < T98::kLayerCount; ++layer)
+	{
+		StackPanel^ panel = layer == T98::LayerMenu ? wheelMenuBindingsPanel : wheelRaceBindingsPanel;
+		for (size_t target = 0; target < T98::kTargetCount; ++target)
+		{
+			auto box = ref new ComboBox();
+			box->Header = WinRtString(T98::TargetName(target));
+			for (int32_t source = 0; source < T98::SourceCount; ++source)
+				box->Items->Append(WinRtString(T98::SourceName(source)));
+			box->SelectionChanged += ref new SelectionChangedEventHandler(
+				this, &DirectXPage::WheelSelectionChanged);
+			panel->Children->Append(box);
+			m_wheelBindingBoxes[layer][target] = box;
+		}
+	}
+	ApplyWheelConfigToUi();
+	m_wheelUiReady = true;
+	std::wostringstream line;
+	line << L"---- session start: wheel support " << (m_wheelConfig.enabled ? L"on" : L"off")
+		<< L", configured " << WheelPlayerLabel(m_wheelConfig.player)
+		<< L", layers " << (m_wheelConfig.layerMode == 1 ? L"switched" : L"combined")
+		<< L", interface navigation mode " << m_wheelConfig.uiNavMode << L" ----";
+	WheelLog(line.str());
+}
+
+void DirectXPage::LoadWheelSettings()
+{
+	T98::Config config = T98::DefaultConfig();
+	try
+	{
+		auto values = ApplicationData::Current->LocalSettings->Values;
+		config.enabled = ReadWheelBool(values, kWheelSettingEnabled, config.enabled);
+		config.player = ReadWheelInt(values, kWheelSettingPlayer, config.player);
+		config.layerMode = ReadWheelInt(values, kWheelSettingLayerMode, config.layerMode);
+		config.toggleSource = ReadWheelInt(values, kWheelSettingToggle, config.toggleSource);
+		config.uiNavMode = ReadWheelInt(values, kWheelSettingUiNav, config.uiNavMode);
+		config.invertSteering = ReadWheelBool(values, kWheelSettingInvert, config.invertSteering);
+		config.pedalThreshold = ReadWheelDouble(values, kWheelSettingPedal, config.pedalThreshold);
+		config.steerDeadzone = ReadWheelDouble(values, kWheelSettingDeadzone, config.steerDeadzone);
+		config.steerSaturation = ReadWheelDouble(values, kWheelSettingSaturation, config.steerSaturation);
+		config.coreDeadzoneCompensation = ReadWheelDouble(
+			values, kWheelSettingCompensation, config.coreDeadzoneCompensation);
+		for (size_t layer = 0; layer < T98::kLayerCount; ++layer)
+			for (size_t target = 0; target < T98::kTargetCount; ++target)
+				config.bindings[layer][target] = ReadWheelInt(
+					values, WheelBindingKey(layer, target).c_str(), config.bindings[layer][target]);
+	}
+	catch (Platform::Exception^)
+	{
+		config = T98::DefaultConfig();
+		WheelLog(L"Stored wheel settings could not be read; defaults are in use.");
+	}
+	T98::Sanitize(config);
+	m_wheelConfig = config;
+}
+
+void DirectXPage::SaveWheelSettings()
+{
+	try
+	{
+		auto values = ApplicationData::Current->LocalSettings->Values;
+		values->Insert(ref new Platform::String(kWheelSettingEnabled),
+			PropertyValue::CreateBoolean(m_wheelConfig.enabled));
+		values->Insert(ref new Platform::String(kWheelSettingPlayer),
+			PropertyValue::CreateInt32(m_wheelConfig.player));
+		values->Insert(ref new Platform::String(kWheelSettingLayerMode),
+			PropertyValue::CreateInt32(m_wheelConfig.layerMode));
+		values->Insert(ref new Platform::String(kWheelSettingToggle),
+			PropertyValue::CreateInt32(m_wheelConfig.toggleSource));
+		values->Insert(ref new Platform::String(kWheelSettingUiNav),
+			PropertyValue::CreateInt32(m_wheelConfig.uiNavMode));
+		values->Insert(ref new Platform::String(kWheelSettingInvert),
+			PropertyValue::CreateBoolean(m_wheelConfig.invertSteering));
+		values->Insert(ref new Platform::String(kWheelSettingPedal),
+			PropertyValue::CreateDouble(m_wheelConfig.pedalThreshold));
+		values->Insert(ref new Platform::String(kWheelSettingDeadzone),
+			PropertyValue::CreateDouble(m_wheelConfig.steerDeadzone));
+		values->Insert(ref new Platform::String(kWheelSettingSaturation),
+			PropertyValue::CreateDouble(m_wheelConfig.steerSaturation));
+		values->Insert(ref new Platform::String(kWheelSettingCompensation),
+			PropertyValue::CreateDouble(m_wheelConfig.coreDeadzoneCompensation));
+		for (size_t layer = 0; layer < T98::kLayerCount; ++layer)
+			for (size_t target = 0; target < T98::kTargetCount; ++target)
+				values->Insert(ref new Platform::String(WheelBindingKey(layer, target).c_str()),
+					PropertyValue::CreateInt32(m_wheelConfig.bindings[layer][target]));
+	}
+	catch (Platform::Exception^ exception)
+	{
+		std::wostringstream line;
+		line << L"Wheel settings could not be saved (HRESULT 0x" << std::hex
+			<< static_cast<unsigned int>(exception->HResult) << L").";
+		WheelLog(line.str());
+		AppendError("The wheel settings could not be saved.");
+	}
+}
+
+void DirectXPage::ApplyWheelConfigToUi()
+{
+	const bool wasLoading = m_loadingWheelSettings;
+	m_loadingWheelSettings = true;
+	wheelEnabledCheck->IsChecked = m_wheelConfig.enabled;
+	wheelInvertCheck->IsChecked = m_wheelConfig.invertSteering;
+	wheelPlayerBox->SelectedIndex = m_wheelConfig.player;
+	wheelLayerModeBox->SelectedIndex = m_wheelConfig.layerMode;
+	wheelToggleBox->SelectedIndex = m_wheelConfig.toggleSource;
+	wheelUiNavBox->SelectedIndex = m_wheelConfig.uiNavMode;
+	wheelSaturationSlider->Value = std::round(m_wheelConfig.steerSaturation * 100.0);
+	wheelDeadzoneSlider->Value = std::round(m_wheelConfig.steerDeadzone * 100.0);
+	wheelCompensationSlider->Value = std::round(m_wheelConfig.coreDeadzoneCompensation * 100.0);
+	wheelPedalSlider->Value = std::round(m_wheelConfig.pedalThreshold * 100.0);
+	for (size_t layer = 0; layer < T98::kLayerCount; ++layer)
+		for (size_t target = 0; target < T98::kTargetCount; ++target)
+			if (m_wheelBindingBoxes[layer][target])
+				m_wheelBindingBoxes[layer][target]->SelectedIndex = m_wheelConfig.bindings[layer][target];
+	m_loadingWheelSettings = wasLoading;
+}
+
+void DirectXPage::WheelSettingsChanged()
+{
+	if (!m_wheelUiReady || m_loadingWheelSettings)
+		return;
+	auto isChecked = [](CheckBox^ box) -> bool
+	{
+		return box->IsChecked != nullptr && box->IsChecked->Value;
+	};
+	auto selected = [](ComboBox^ box, int32_t fallback) -> int32_t
+	{
+		return box && box->SelectedIndex >= 0 ? box->SelectedIndex : fallback;
+	};
+
+	T98::Config updated = m_wheelConfig;
+	updated.enabled = isChecked(wheelEnabledCheck);
+	updated.invertSteering = isChecked(wheelInvertCheck);
+	updated.player = selected(wheelPlayerBox, m_wheelConfig.player);
+	updated.layerMode = selected(wheelLayerModeBox, m_wheelConfig.layerMode);
+	updated.toggleSource = selected(wheelToggleBox, m_wheelConfig.toggleSource);
+	updated.uiNavMode = selected(wheelUiNavBox, m_wheelConfig.uiNavMode);
+	updated.steerSaturation = wheelSaturationSlider->Value / 100.0;
+	updated.steerDeadzone = wheelDeadzoneSlider->Value / 100.0;
+	updated.coreDeadzoneCompensation = wheelCompensationSlider->Value / 100.0;
+	updated.pedalThreshold = wheelPedalSlider->Value / 100.0;
+	for (size_t layer = 0; layer < T98::kLayerCount; ++layer)
+		for (size_t target = 0; target < T98::kTargetCount; ++target)
+			updated.bindings[layer][target] = selected(
+				m_wheelBindingBoxes[layer][target], m_wheelConfig.bindings[layer][target]);
+	T98::Sanitize(updated);
+
+	bool ownershipChanged =
+		updated.enabled != m_wheelConfig.enabled || updated.player != m_wheelConfig.player;
+	if (ownershipChanged && m_gameRunning)
+	{
+		// Player assignments are frozen while a title is running.
+		updated.enabled = m_wheelConfig.enabled;
+		updated.player = m_wheelConfig.player;
+		ownershipChanged = false;
+		m_wheelConfig = updated;
+		ApplyWheelConfigToUi();
+		settingsStatus->Text = "Stop the running game before changing the wheel's player.";
+	}
+	else
+		m_wheelConfig = updated;
+	SaveWheelSettings();
+	if (ownershipChanged)
+	{
+		std::wostringstream line;
+		line << L"Settings: wheel support " << (m_wheelConfig.enabled ? L"on" : L"off")
+			<< L", configured " << WheelPlayerLabel(m_wheelConfig.player) << L".";
+		WheelLog(line.str());
+		m_wheelMapper.Reset();
+		UpdateWheelClaim();
+		PublishGamepadStates();
+	}
+	UpdateGamepadStatus();
+}
+
+void DirectXPage::WheelSelectionChanged(Platform::Object^, SelectionChangedEventArgs^)
+{
+	WheelSettingsChanged();
+}
+
+void DirectXPage::WheelCheckChanged(Platform::Object^, RoutedEventArgs^)
+{
+	WheelSettingsChanged();
+}
+
+void DirectXPage::WheelValueChanged(Platform::Object^,
+	Windows::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs^)
+{
+	WheelSettingsChanged();
+}
+
+void DirectXPage::ResetWheelBindings_Click(Platform::Object^, RoutedEventArgs^)
+{
+	if (!m_wheelUiReady)
+		return;
+	const T98::Config defaults = T98::DefaultConfig();
+	m_wheelConfig.bindings = defaults.bindings;
+	m_wheelConfig.toggleSource = defaults.toggleSource;
+	m_wheelConfig.invertSteering = defaults.invertSteering;
+	m_wheelConfig.pedalThreshold = defaults.pedalThreshold;
+	m_wheelConfig.steerDeadzone = defaults.steerDeadzone;
+	m_wheelConfig.steerSaturation = defaults.steerSaturation;
+	m_wheelConfig.coreDeadzoneCompensation = defaults.coreDeadzoneCompensation;
+	ApplyWheelConfigToUi();
+	SaveWheelSettings();
+	WheelLog(L"Settings: default wheel bindings and steering values restored.");
+	settingsStatus->Text = "Default wheel bindings restored.";
+}
+
+void DirectXPage::RefreshRacingWheel()
+{
+	// Enumerate only on startup and resume, never per frame (see m_gamepads).
+	m_wheel = nullptr;
+	m_wheelNav = nullptr;
+	m_lastWheelInput = T98::WheelInput{};
+	m_lastWheelPad = T98::PadState{};
+	m_lastWheelSources = 0;
+	m_wheelMapper.Reset();
+	m_wheelUiNavigator.Reset();
+	if (m_slots.reserved >= 0)
+		PublishSlotDisconnected(static_cast<size_t>(m_slots.reserved));
+	try
+	{
+		auto wheels = RacingWheel::RacingWheels;
+		if (wheels && wheels->Size > 0)
+		{
+			if (wheels->Size > 1)
+				WheelLog(L"More than one racing wheel is connected; only the first one is used.");
+			AttachWheel(wheels->GetAt(0));
+		}
+		else
+			WheelLog(L"No racing wheel is connected at enumeration time.");
+	}
+	catch (Platform::Exception^ exception)
+	{
+		std::wostringstream line;
+		line << L"Racing wheel enumeration failed (HRESULT 0x" << std::hex
+			<< static_cast<unsigned int>(exception->HResult) << L").";
+		WheelLog(line.str());
+	}
+}
+
+void DirectXPage::AttachWheel(RacingWheel^ wheel)
+{
+	if (!wheel)
+		return;
+	if (m_wheel)
+	{
+		if (m_wheel != wheel)
+			WheelLog(L"A second racing wheel was ignored; one wheel is one player.");
+		return;
+	}
+	m_wheel = wheel;
+	m_wheelSeen = true;
+	m_wheelId = WheelIdentity(wheel);
+	m_wheelName = WheelDisplayName(wheel);
+	try
+	{
+		m_wheelNav = UINavigationController::FromGameController(wheel);
+	}
+	catch (Platform::Exception^)
+	{
+		m_wheelNav = nullptr;
+	}
+	m_wheelMapper.Reset();
+	m_wheelUiNavigator.Reset();
+
+	std::wostringstream line;
+	line << L"Wheel connected: \"" << (m_wheelName.empty() ? L"(no name reported)" : m_wheelName.c_str())
+		<< L"\", identity " << (m_wheelId.empty() ? L"unavailable" : L"available")
+		<< L", navigation buttons " << (m_wheelNav ? L"available" : L"UNAVAILABLE");
+	try
+	{
+		line << L", clutch " << (wheel->HasClutch ? L"yes" : L"no")
+			<< L", handbrake " << (wheel->HasHandbrake ? L"yes" : L"no")
+			<< L", max angle " << wheel->MaxWheelAngle;
+	}
+	catch (Platform::Exception^)
+	{
+	}
+	WheelLog(line.str());
+	if (!m_wheelNav)
+		WheelLog(L"A/B/X/Y/Menu/View are not reported by this wheel; bind numbered wheel buttons instead.");
+
+	UpdateWheelClaim();
+	if (m_slots.reserved >= 0)
+		m_hasPublishedGamepadStates[static_cast<size_t>(m_slots.reserved)] = false;
+	if (m_gameRunning)
+		ShowWheelToast(WinRtString(L"Wheel connected"));
+}
+
+void DirectXPage::DetachWheel(const wchar_t* reason, int hresult)
+{
+	if (!m_wheel)
+		return;
+	m_wheel = nullptr;
+	m_wheelNav = nullptr;
+	m_lastWheelInput = T98::WheelInput{};
+	m_lastWheelPad = T98::PadState{};
+	m_lastWheelSources = 0;
+	m_wheelMapper.Reset();
+	m_wheelUiNavigator.Reset();
+	// Release the wheel's inputs now, not on the next frame. Its player stays
+	// reserved, and no other player is touched.
+	if (m_slots.reserved >= 0)
+		PublishSlotDisconnected(static_cast<size_t>(m_slots.reserved));
+	std::wostringstream line;
+	line << L"Wheel disconnected (" << (reason ? reason : L"unknown reason");
+	if (hresult != 0)
+		line << L", HRESULT 0x" << std::hex << static_cast<unsigned int>(hresult) << std::dec;
+	line << L"); inputs released";
+	if (m_slots.reserved >= 0)
+		line << L", " << WheelPlayerLabel(m_slots.reserved) << L" stays reserved";
+	line << L".";
+	WheelLog(line.str());
+	if (m_gameRunning)
+		ShowWheelToast(WinRtString(L"Wheel disconnected - inputs released"));
+	UpdateGamepadStatus();
+}
+
+void DirectXPage::UpdateWheelClaim()
+{
+	if (!m_wheelConfig.enabled)
+	{
+		m_slots.blockedIdentity.clear();
+		m_wheelClaimDeferredLogged = false;
+		const int previous = m_slots.Release();
+		if (previous >= 0)
+		{
+			PublishSlotDisconnected(static_cast<size_t>(previous));
+			WheelLog(L"Wheel support is off; " + WheelPlayerLabel(previous) + L" was returned to gamepads.");
+		}
+		return;
+	}
+	if (!m_wheelSeen)
+		return;
+
+	// The wheel is one player. If the system also projects it as a gamepad,
+	// that projection is removed and refused from now on.
+	if (!m_wheelId.empty() && m_slots.blockedIdentity != m_wheelId)
+	{
+		m_slots.blockedIdentity = m_wheelId;
+		const int duplicate = m_slots.FindIdentity(m_wheelId);
+		if (duplicate >= 0)
+		{
+			DisconnectGamepadSlot(static_cast<size_t>(duplicate));
+			m_slots.Forget(duplicate);
+			WheelLog(L"Removed the wheel's gamepad projection from " + WheelPlayerLabel(duplicate) + L".");
+		}
+	}
+
+	const int target = m_wheelConfig.player;
+	if (m_slots.reserved == target)
+		return;
+	if (!m_slots.CanReserve(target, m_gameRunning))
+	{
+		if (!m_wheelClaimDeferredLogged)
+		{
+			m_wheelClaimDeferredLogged = true;
+			WheelLog(WheelPlayerLabel(target) +
+				L" is used by a gamepad in the running game; the wheel takes over when the game stops.");
+		}
+		return;
+	}
+	m_wheelClaimDeferredLogged = false;
+
+	Gamepad^ displaced = m_gamepads[static_cast<size_t>(target)];
+	const auto move = m_slots.Reserve(target);
+	if (!move.changed)
+		return;
+	if (move.previousReserved >= 0)
+		PublishSlotDisconnected(static_cast<size_t>(move.previousReserved));
+	m_gamepads[static_cast<size_t>(target)] = nullptr;
+	PublishSlotDisconnected(static_cast<size_t>(target));
+	if (displaced)
+	{
+		StopGamepadVibration(displaced);
+		if (move.movedTo >= 0)
+		{
+			m_gamepads[static_cast<size_t>(move.movedTo)] = displaced;
+			m_hasPublishedGamepadStates[static_cast<size_t>(move.movedTo)] = false;
+			m_lastAppliedGamepadRumble[static_cast<size_t>(move.movedTo)] = -1.0f;
+			WheelLog(L"The gamepad on " + WheelPlayerLabel(target) + L" moved to " +
+				WheelPlayerLabel(move.movedTo) + L" to make room for the wheel.");
+		}
+		else
+		{
+			WheelLog(L"The gamepad on " + WheelPlayerLabel(target) +
+				L" was unassigned: all four players are in use.");
+			AppendError("A gamepad was unassigned because the wheel and three other controllers use all four players.");
+		}
+	}
+	WheelLog(L"The wheel is " + WheelPlayerLabel(target) + L".");
+}
+
+T98::WheelInput DirectXPage::ReadWheelInput()
+{
+	T98::WheelInput input;
+	if (!m_wheel)
+		return input;
+	try
+	{
+		const auto reading = m_wheel->GetCurrentReading();
+		input.steer = reading.Wheel;
+		input.throttle = reading.Throttle;
+		input.brake = reading.Brake;
+		input.clutch = reading.Clutch;
+		input.handbrake = reading.Handbrake;
+		input.wheelButtons = NormalizeWheelButtons(reading.Buttons);
+		input.valid = true;
+	}
+	catch (Platform::Exception^ exception)
+	{
+		// Xbox can revoke the device before the removal event is delivered.
+		DetachWheel(L"input read failed", exception->HResult);
+		return T98::WheelInput{};
+	}
+	if (m_wheelNav)
+	{
+		try
+		{
+			const auto navigation = m_wheelNav->GetCurrentReading();
+			input.nav = NormalizeWheelNavigation(
+				navigation.RequiredButtons, navigation.OptionalButtons);
+		}
+		catch (Platform::Exception^ exception)
+		{
+			m_wheelNav = nullptr;
+			std::wostringstream line;
+			line << L"Wheel navigation buttons stopped responding (HRESULT 0x" << std::hex
+				<< static_cast<unsigned int>(exception->HResult)
+				<< L"); A/B/X/Y/Menu/View are unavailable until the wheel is reconnected.";
+			WheelLog(line.str());
+		}
+	}
+	return input;
+}
+
+void DirectXPage::OnRacingWheelAdded(Platform::Object^, RacingWheel^ wheel)
+{
+	// Same threading rule as OnGamepadAdded: all page state stays on the XAML
+	// dispatcher.
+	Platform::WeakReference weakThis(this);
+	create_task(Dispatcher->RunAsync(CoreDispatcherPriority::Normal,
+		ref new DispatchedHandler([weakThis, wheel]()
+		{
+			auto page = weakThis.Resolve<DirectXPage>();
+			if (!page || page->m_runtimeSuspended) return;
+			page->AttachWheel(wheel);
+			if (!page->m_gamepadProfileReady)
+				page->m_gamepadRetryFrames = 59;
+			page->PublishGamepadStates();
+			page->UpdateGamepadStatus();
+		})));
+}
+
+void DirectXPage::OnRacingWheelRemoved(Platform::Object^, RacingWheel^ wheel)
+{
+	Platform::WeakReference weakThis(this);
+	create_task(Dispatcher->RunAsync(CoreDispatcherPriority::Normal,
+		ref new DispatchedHandler([weakThis, wheel]()
+		{
+			auto page = weakThis.Resolve<DirectXPage>();
+			if (!page || !page->m_wheel) return;
+			bool sameWheel = page->m_wheel == wheel;
+			if (!sameWheel)
+			{
+				const auto identity = WheelIdentity(wheel);
+				sameWheel = !identity.empty() && identity == page->m_wheelId;
+			}
+			if (!sameWheel) return;
+			page->DetachWheel(L"removed", 0);
+			page->PublishGamepadStates();
+		})));
+}
+
+void DirectXPage::UpdateWheelStatus()
+{
+	std::wostringstream text;
+	const std::wstring name = m_wheelName.empty() ? std::wstring(L"Racing wheel") : m_wheelName;
+	const std::wstring configured = WheelPlayerLabel(m_wheelConfig.player);
+	if (!m_wheelConfig.enabled)
+		text << L"Wheel support is off.";
+	else if (!m_wheelSeen)
+		text << L"No racing wheel detected. Connect the wheel in Xbox mode; it becomes " << configured << L".";
+	else if (m_wheel && m_slots.reserved == m_wheelConfig.player)
+		text << name << L" connected as " << configured << L".";
+	else if (m_wheel)
+		text << name << L" detected. " << configured
+			<< L" is used by a gamepad in the running game; the wheel takes over when the game stops.";
+	else if (m_slots.reserved >= 0)
+		text << L"Wheel disconnected. " << WheelPlayerLabel(m_slots.reserved) << L" stays reserved for it.";
+	else
+		text << L"Wheel disconnected.";
+	auto value = ref new Platform::String(text.str().c_str());
+	if (Platform::String::CompareOrdinal(wheelStatusText->Text, value) != 0)
+		wheelStatusText->Text = value;
+}
+
+void DirectXPage::UpdateWheelMonitor()
+{
+	// Live readout for checking the physical wheel. Only while the Settings
+	// tab is on screen.
+	if (!m_wheelUiReady || tabsPanel->Visibility != VisibleValue || toolTabs->SelectedIndex != 4)
+		return;
+	std::wostringstream text;
+	if (!m_wheel || !m_lastWheelInput.valid)
+		text << L"Live input: no wheel";
+	else
+	{
+		text << std::fixed << std::setprecision(2)
+			<< L"Live input:  steering " << m_lastWheelInput.steer
+			<< L"  stick " << static_cast<double>(m_lastWheelPad.leftX)
+			<< L"  accelerator " << m_lastWheelInput.throttle
+			<< L"  brake " << m_lastWheelInput.brake
+			<< L"  pressed: ";
+		bool any = false;
+		for (int32_t source = 1; source < T98::SourceCount; ++source)
+		{
+			if ((m_lastWheelSources & T98::SourceBit(source)) == 0)
+				continue;
+			if (any)
+				text << L", ";
+			text << T98::SourceName(source);
+			any = true;
+		}
+		if (!any)
+			text << L"nothing";
+	}
+	auto value = ref new Platform::String(text.str().c_str());
+	if (Platform::String::CompareOrdinal(wheelMonitorText->Text, value) != 0)
+		wheelMonitorText->Text = value;
+}
+
+void DirectXPage::ShowWheelToast(Platform::String^ text)
+{
+	wheelToastText->Text = text;
+	wheelToast->Visibility = VisibleValue;
+	m_wheelToastUntilMs = GetTickCount64() + 2500;
+}
+
+void DirectXPage::UpdateWheelUiNavigation()
+{
+	// The host interface owns input whenever no title is running. While a
+	// title runs, every wheel input belongs to the emulated controller.
+	const bool uiOwnsInput = !m_gameRunning || tabsPanel->Visibility == VisibleValue;
+	uint32_t held = 0;
+	if (uiOwnsInput && !m_externalLoadingVisible && m_wheel && m_wheelConfig.enabled &&
+		m_lastWheelInput.valid)
+		held = T98::UiNavigator::ActionsFromNav(m_lastWheelInput.nav, m_lastWheelInput.wheelButtons);
+	const uint32_t actions = m_wheelUiNavigator.Update(
+		held, GetTickCount64(), m_wheelConfig.uiNavMode);
+	if (actions == 0 || !uiOwnsInput || m_externalLoadingVisible)
+		return;
+	if (!m_wheelHostNavigationLogged)
+	{
+		m_wheelHostNavigationLogged = true;
+		WheelLog(L"Interface navigation: the host is handling wheel presses itself "
+			L"(the system did not project them, or host mode is selected).");
+	}
+	for (uint32_t bit = 1; bit <= T98::UiNavigator::ActionCancel; bit <<= 1)
+		if ((actions & bit) != 0)
+			ExecuteWheelUiAction(bit);
+}
+
+void DirectXPage::ExecuteWheelUiAction(uint32_t action)
+{
+	namespace XamlInput = Windows::UI::Xaml::Input;
+	namespace Peers = Windows::UI::Xaml::Automation::Peers;
+	namespace Provider = Windows::UI::Xaml::Automation::Provider;
+	using Nav = T98::UiNavigator;
+	try
+	{
+		auto focused = dynamic_cast<DependencyObject^>(XamlInput::FocusManager::GetFocusedElement());
+		DependencyObject^ self = this;
+		const bool nothingFocused = focused == nullptr || focused == self;
+		std::array<Button^, 6> navigationButtons{
+			homeNavigationButton, libraryNavigationButton, toyPadNavigationButton,
+			graphicPacksNavigationButton, settingsNavigationButton, helpNavigationButton
+		};
+		auto focusCurrentTabButton = [&]()
+		{
+			int index = toolTabs->SelectedIndex;
+			if (index < 0 || index >= static_cast<int>(navigationButtons.size()))
+				index = 0;
+			navigationButtons[static_cast<size_t>(index)]->Focus(
+				Windows::UI::Xaml::FocusState::Keyboard);
+		};
+
+		if (action == Nav::ActionUp || action == Nav::ActionDown ||
+			action == Nav::ActionLeft || action == Nav::ActionRight)
+		{
+			if (nothingFocused)
+			{
+				focusCurrentTabButton();
+				return;
+			}
+			const bool horizontal = action == Nav::ActionLeft || action == Nav::ActionRight;
+			auto slider = dynamic_cast<Slider^>(focused);
+			if (slider && horizontal)
+			{
+				double step = slider->StepFrequency > 0.0 ? slider->StepFrequency : slider->SmallChange;
+				if (!(step > 0.0))
+					step = 1.0;
+				const double next = slider->Value + (action == Nav::ActionRight ? step : -step);
+				slider->Value = (std::max)(slider->Minimum, (std::min)(next, slider->Maximum));
+				return;
+			}
+			XamlInput::FocusNavigationDirection direction = XamlInput::FocusNavigationDirection::Down;
+			if (action == Nav::ActionUp) direction = XamlInput::FocusNavigationDirection::Up;
+			else if (action == Nav::ActionLeft) direction = XamlInput::FocusNavigationDirection::Left;
+			else if (action == Nav::ActionRight) direction = XamlInput::FocusNavigationDirection::Right;
+			auto candidate = dynamic_cast<Control^>(
+				XamlInput::FocusManager::FindNextFocusableElement(direction));
+			if (candidate)
+				candidate->Focus(Windows::UI::Xaml::FocusState::Keyboard);
+			else
+				XamlInput::FocusManager::TryMoveFocus(direction);
+			return;
+		}
+
+		auto comboItem = dynamic_cast<ComboBoxItem^>(focused);
+		ComboBox^ comboOwner = nullptr;
+		if (comboItem)
+			comboOwner = dynamic_cast<ComboBox^>(ItemsControl::ItemsControlFromItemContainer(comboItem));
+		auto combo = dynamic_cast<ComboBox^>(focused);
+
+		if (action == Nav::ActionCancel)
+		{
+			if (comboOwner)
+			{
+				comboOwner->IsDropDownOpen = false;
+				comboOwner->Focus(Windows::UI::Xaml::FocusState::Keyboard);
+			}
+			else if (combo && combo->IsDropDownOpen)
+				combo->IsDropDownOpen = false;
+			else
+				focusCurrentTabButton();
+			return;
+		}
+
+		if (action != Nav::ActionAccept)
+			return;
+		if (nothingFocused)
+		{
+			focusCurrentTabButton();
+			return;
+		}
+		if (comboItem)
+		{
+			if (comboOwner)
+			{
+				const int index = comboOwner->IndexFromContainer(comboItem);
+				if (index >= 0)
+					comboOwner->SelectedIndex = index;
+				comboOwner->IsDropDownOpen = false;
+				comboOwner->Focus(Windows::UI::Xaml::FocusState::Keyboard);
+			}
+			return;
+		}
+		if (combo)
+		{
+			combo->IsDropDownOpen = !combo->IsDropDownOpen;
+			return;
+		}
+		auto listItem = dynamic_cast<ListViewItem^>(focused);
+		if (listItem)
+		{
+			ItemsControl^ library = installedGamesList;
+			if (ItemsControl::ItemsControlFromItemContainer(listItem) == library)
+			{
+				const int index = installedGamesList->IndexFromContainer(listItem);
+				if (index >= 0)
+					CommitInstalledGameIndex(static_cast<unsigned int>(index));
+				return;
+			}
+		}
+		auto toggleSwitch = dynamic_cast<ToggleSwitch^>(focused);
+		if (toggleSwitch)
+		{
+			toggleSwitch->IsOn = !toggleSwitch->IsOn;
+			return;
+		}
+		auto element = dynamic_cast<UIElement^>(focused);
+		if (!element)
+			return;
+		auto peer = Peers::FrameworkElementAutomationPeer::CreatePeerForElement(element);
+		if (!peer)
+			return;
+		auto invoke = dynamic_cast<Provider::IInvokeProvider^>(
+			peer->GetPattern(Peers::PatternInterface::Invoke));
+		if (invoke)
+		{
+			invoke->Invoke();
+			return;
+		}
+		auto toggle = dynamic_cast<Provider::IToggleProvider^>(
+			peer->GetPattern(Peers::PatternInterface::Toggle));
+		if (toggle)
+		{
+			toggle->Toggle();
+			return;
+		}
+		auto selection = dynamic_cast<Provider::ISelectionItemProvider^>(
+			peer->GetPattern(Peers::PatternInterface::SelectionItem));
+		if (selection)
+			selection->Select();
+	}
+	catch (Platform::Exception^ exception)
+	{
+		std::wostringstream line;
+		line << L"Interface navigation action " << action << L" failed (HRESULT 0x" << std::hex
+			<< static_cast<unsigned int>(exception->HResult) << L").";
+		WheelLog(line.str());
+	}
 }
