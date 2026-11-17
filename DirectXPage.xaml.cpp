@@ -1307,11 +1307,11 @@ bool IsCemuExternalFolderAccessEntry(const AccessListEntry& entry)
 	return wcsncmp(metadata, ExternalFolderAccessMetadataPrefix, prefixLength) == 0;
 }
 
-// Experimental: Xbox Developer Mode stores files copied over the network in
-// DevelopmentFiles. Microsoft documents that apps cannot read arbitrary
-// folders on Xbox without a picker, so this is only a probe: if the console
-// lets the app open the folder by path, it is scanned like an external folder;
-// otherwise the refusal is logged and nothing else changes.
+// Xbox Developer Mode stores files copied over the network in
+// DevelopmentFiles. With the broadFileSystemAccess capability (declared in
+// Package.appxmanifest) the folder can be opened by path and is scanned like
+// a picked external folder. If the console refuses, the refusal is logged and
+// nothing else changes.
 const wchar_t* const DevelopmentFilesGameFolders[] = {
 	L"D:\\DevelopmentFiles\\Games\\wiiu",
 	L"S:\\DevelopmentFiles\\Games\\wiiu",
