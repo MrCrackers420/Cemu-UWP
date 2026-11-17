@@ -133,6 +133,7 @@ namespace Cemu_UWP_Host
 		void CommitInstalledGameIndex(unsigned int index);
 		void ShowWheelToast(Platform::String^ text);
 		void WheelLog(const std::wstring& message);
+		size_t GetPersistedExternalFolderCount();
 		void UpdateGamepadStatus();
 		void InitializeGlobalGamepadMappingUi();
 		void LoadGlobalGamepadMapping();

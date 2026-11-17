@@ -100,6 +100,12 @@ g++ -std=c++14 -Wall -Wextra tests/t98_bridge_tests.cpp -o t98_tests && ./t98_te
 
 For any failure keep `t98_bridge.log` and `log.txt` from the same session.
 
+## Games in DevelopmentFiles (experimental)
+
+On startup and on **Rescan external folders** the app tries to open `D:\DevelopmentFiles\Games\wiiu` (then `S:\…`) directly. If the console allows it, the games there are listed as **External storage** with no file picker. Microsoft documents that Xbox apps cannot read arbitrary folders without a picker, so this will probably be refused; the result is written to `t98_bridge.log` as `[storage] … access denied / not found / opened`.
+
+The way that works without the Xbox file explorer is `LocalState\GamesToInstall`: upload games there with Device Portal → File explorer → `LocalAppData\<Cemu package>\LocalState\GamesToInstall`, then press **Scan local folder**.
+
 ## Known limits
 
 - One wheel. A second wheel is ignored.

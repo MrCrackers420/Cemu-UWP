@@ -1307,6 +1307,16 @@ bool IsCemuExternalFolderAccessEntry(const AccessListEntry& entry)
 	return wcsncmp(metadata, ExternalFolderAccessMetadataPrefix, prefixLength) == 0;
 }
 
+// Experimental: Xbox Developer Mode stores files copied over the network in
+// DevelopmentFiles. Microsoft documents that apps cannot read arbitrary
+// folders on Xbox without a picker, so this is only a probe: if the console
+// lets the app open the folder by path, it is scanned like an external folder;
+// otherwise the refusal is logged and nothing else changes.
+const wchar_t* const DevelopmentFilesGameFolders[] = {
+	L"D:\\DevelopmentFiles\\Games\\wiiu",
+	L"S:\\DevelopmentFiles\\Games\\wiiu",
+};
+
 std::vector<Platform::String^> GetPersistedExternalFolderTokens()
 {
 	std::vector<Platform::String^> tokens;
@@ -1606,19 +1616,14 @@ void DirectXPage::RestoreExternalStorageFolders(bool showEmptyStatus)
 	if (!m_main || !m_cemuReady || m_libraryBusy || m_gameRunning)
 		return;
 	const auto tokens = GetPersistedExternalFolderTokens();
-	if (tokens.empty())
-	{
-		m_externalTitles.clear();
-		if (showEmptyStatus)
-			launchStatus->Text = "No external folders saved";
-		RefreshLibrary();
-		return;
-	}
-	launchStatus->Text = "Restoring external game folders...";
+	launchStatus->Text = tokens.empty()
+		? "Checking DevelopmentFiles\\Games\\wiiu..."
+		: "Restoring external game folders...";
 	Platform::WeakReference weakThis(this);
 	create_task([tokens]()
 	{
 		std::vector<StorageFolder^> roots;
+		std::vector<std::wstring> probeLog;
 		auto accessList = StorageApplicationPermissions::FutureAccessList;
 		for (const auto& token : tokens)
 		{
@@ -1633,21 +1638,69 @@ void DirectXPage::RestoreExternalStorageFolders(bool showEmptyStatus)
 				// Keep the token so a temporarily disconnected drive can return later.
 			}
 		}
-		return roots;
-	}).then([weakThis](std::vector<StorageFolder^> restored)
+		bool developmentFilesFound = false;
+		for (const auto* candidate : DevelopmentFilesGameFolders)
+		{
+			std::wostringstream line;
+			line << L"[storage] " << candidate << L": ";
+			try
+			{
+				auto root = create_task(StorageFolder::GetFolderFromPathAsync(
+					ref new Platform::String(candidate))).get();
+				if (root)
+				{
+					roots.emplace_back(root);
+					developmentFilesFound = true;
+					line << L"opened, scanning it.";
+					probeLog.emplace_back(line.str());
+					break;
+				}
+				line << L"no folder returned.";
+			}
+			catch (Platform::Exception^ exception)
+			{
+				const auto code = static_cast<unsigned int>(exception->HResult);
+				line << (code == 0x80070005u ? L"access denied"
+					: code == 0x80070002u || code == 0x80070003u ? L"not found"
+					: L"cannot be opened")
+					<< L" (HRESULT 0x" << std::hex << code << L").";
+			}
+			catch (...)
+			{
+				line << L"cannot be opened (unknown error).";
+			}
+			probeLog.emplace_back(line.str());
+		}
+		return std::make_tuple(std::move(roots), std::move(probeLog), developmentFilesFound);
+	}).then([weakThis, showEmptyStatus](
+		std::tuple<std::vector<StorageFolder^>, std::vector<std::wstring>, bool> result)
 	{
 		auto page = weakThis.Resolve<DirectXPage>();
 		if (!page)
 			return;
+		auto& restored = std::get<0>(result);
+		for (const auto& line : std::get<1>(result))
+			page->WheelLog(line);
+		const bool developmentFilesFound = std::get<2>(result);
 		if (restored.empty())
 		{
 			page->m_externalTitles.clear();
-			page->launchStatus->Text = "Saved external folders are disconnected or unavailable";
+			if (showEmptyStatus)
+				page->launchStatus->Text = page->GetPersistedExternalFolderCount() == 0
+					? "No external folders saved; DevelopmentFiles\\Games\\wiiu is not readable by the app"
+					: "Saved external folders are disconnected or unavailable";
 			page->RefreshLibrary();
 			return;
 		}
+		if (developmentFilesFound)
+			page->WheelLog(L"[storage] DevelopmentFiles game folder is readable; its games are listed as External storage.");
 		page->BeginExternalStorageScan(restored);
 	}, task_continuation_context::use_current());
+}
+
+size_t DirectXPage::GetPersistedExternalFolderCount()
+{
+	return GetPersistedExternalFolderTokens().size();
 }
 
 void DirectXPage::BeginExternalStorageScan(const std::vector<StorageFolder^>& storageRoots)
