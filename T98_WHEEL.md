@@ -1,6 +1,6 @@
 # Racing wheel bridge (Thrustmaster T98) for Cemu UWP
 
-**Status:** compiles and packages on GitHub Actions (`Cemu-UWP-Host_1.0.10.98_x64.msixbundle`), and the simulated logic tests pass there. **Not tested on a physical T98, an Xbox, or Mario Kart 8.** Every hardware test below is marked NOT RUN until someone runs it on the console.
+**Status:** compiles and packages on GitHub Actions (`Cemu-UWP-Host_1.0.10.99_x64.msixbundle`), and the simulated logic tests pass there. **Not tested on a physical T98, an Xbox, or Mario Kart 8.** Every hardware test below is marked NOT RUN until someone runs it on the console.
 
 Base: `XboxEmuPorts/Cemu-UWP` at `bbaf33a`. The Cemu core (`XboxEmuPorts/Cemu`, branch `build-msvc-d3d11`) is unchanged.
 
@@ -66,7 +66,7 @@ Fetch both files with Xbox Device Portal → File explorer → `LocalAppData\<pa
 
 1. In Device Portal, copy `LocalState` from the installed Cemu package to a PC first.
 2. Install the new `.msixbundle` **over** the existing app (Device Portal → Add, with `Microsoft.VCLibs.x64.14.00.appx` as a dependency if asked). Do not uninstall: uninstalling deletes `LocalState`.
-3. The package keeps upstream's identity and signing key and is versioned `1.0.10.98`, above upstream's `1.0.10.2`, so it updates in place.
+3. The package keeps upstream's identity and signing key and is versioned `1.0.10.99`, above upstream's `1.0.10.2`, so it updates in place.
 4. If Device Portal refuses the update (different signer or a higher installed version), stop and keep the existing install.
 
 ## Tests
